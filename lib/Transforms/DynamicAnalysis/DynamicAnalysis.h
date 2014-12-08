@@ -10,6 +10,7 @@
 #define LLVM_SUPPORT_DYNAMIC_ANALYSIS_H
 
 
+#include "../../../lib/ExecutionEngine/Interpreter/Interpreter.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/DebugInfo.h"
@@ -18,7 +19,6 @@
 #include "top-down-size-splay.hpp"
 #include "llvm/Support/InstIterator.h"
 #include "llvm/Support/GetElementPtrTypeIterator.h"
-#include "llvm/Support/CallSite.h"
 
 
 
@@ -36,12 +36,12 @@
 #define DEBUG_MEMORY_TRACES
 #define DEBUG_REUSE_DISTANCE
 
-//#define DEBUG_DEPS_FUNCTION_CALL
+#define DEBUG_DEPS_FUNCTION_CALL
 #define DEBUG_SPAN_CALCULATION
-//#define DEBUG_AGU
+#define DEBUG_AGU
 //#define DEBUG_OOO_BUFFERS
 #define DEBUG_ISSUE_CYCLE
-//#define DEBUG_PHI_NODE
+#define DEBUG_PHI_NODE
 //#define DEBUG_FUNCTION_CALL_STACK
 #define DEBUG_PREFETCHER
 
@@ -351,7 +351,8 @@ using namespace llvm;
 using namespace std;
 using namespace SplayTree;
 using namespace SplayTreeBoolean;
-
+using namespace SimpleSplayTree;
+using namespace ComplexSplayTree;
 
 
 
@@ -469,9 +470,12 @@ public:
   vector<uint64_t> ReservationStationIssueCycles;
   deque<uint64_t> ReorderBufferCompletionCycles;
   vector<uint64_t> LoadBufferCompletionCycles;
+  SimpleTree<uint64_t> *LoadBufferCompletionCyclesTree;
   vector<uint64_t> StoreBufferCompletionCycles;
   vector<uint64_t> LineFillBufferCompletionCycles;
   vector<InstructionDispatchInfo> DispatchToLoadBufferQueue;
+  ComplexTree<uint64_t> *DispatchToLoadBufferQueueTree;
+
   vector<InstructionDispatchInfo> DispatchToStoreBufferQueue;
   vector<InstructionDispatchInfo> DispatchToLineFillBufferQueue;
   
@@ -550,6 +554,10 @@ public:
   vector <Tree<uint64_t> * > StallCycles;
   vector <uint64_t> NInstructionsStalled;
   
+  uint64_t MinLoadBuffer;
+  uint64_t MaxDispatchToLoadBufferQueueTree;
+vector<ComplexTree<uint64_t> *> PointersToRemove;
+  
   //Statistics
   double AverageILP;
   
@@ -601,11 +609,11 @@ public:
   
   
   vector<Instruction*> instructionPool;
-  int count=0;
   
   
   void analyze();
   void analyzeInstruction(Instruction &I, uint64_t addr);
+  void analyzeInstruction(Instruction &I, ExecutionContext &SF, GenericValue * visitResult);
   
   void insertInstructionValueIssueCycle(Value* v,uint64_t InstructionIssueCycle, bool isPHINode = 0 );
   void insertCacheLineLastAccess(uint64_t v,uint64_t LastAccess );
@@ -632,6 +640,7 @@ public:
   bool InsertNextAvailableIssueCycle(uint64_t NextAvailableCycle, unsigned ExecutionResource, uint64_t ExtendedInstructionType,
                                      unsigned NElementsVector = 1, bool isPrefetch=0);
   
+  void IncreaseInstructionFetchCycle();
   
   unsigned CalculateIssueCycleGranularity(unsigned ExecutionResource, unsigned NElementsVector=1);
   
@@ -658,25 +667,36 @@ public:
       
   uint64_t GetMinIssueCycleReservationStation();
   uint64_t GetMinCompletionCycleLoadBuffer();
+  uint64_t GetMinCompletionCycleLoadBufferTree();
+
   uint64_t GetMinCompletionCycleStoreBuffer();
    uint64_t GetMinCompletionCycleLineFillBuffer();
-  uint64_t GetMinCompletionCycleDispatchToLoadBufferQueue();
   
   void RemoveFromReservationStation(uint64_t Cycle);
   void RemoveFromReorderBuffer(uint64_t Cycle);
   void RemoveFromLoadBuffer(uint64_t Cycle);
+  void RemoveFromLoadBufferTree(uint64_t Cycle);
+
   void RemoveFromStoreBuffer(uint64_t Cycle);
   void RemoveFromLineFillBuffer(uint64_t Cycle);
+  
   void RemoveFromDispatchToLoadBufferQueue(uint64_t Cycle);
+    void RemoveFromDispatchToLoadBufferQueueTree(uint64_t Cycle);
   void RemoveFromDispatchToStoreBufferQueue(uint64_t Cycle);
   void RemoveFromDispatchToLineFillBufferQueue(uint64_t Cycle);
   
+  ComplexTree<uint64_t> * RemoveFromDispatchAndInsertIntoLoad(uint64_t i, ComplexTree<uint64_t> * t);
+  void inOrder(uint64_t i, ComplexTree<uint64_t> * n);
   
   void DispatchToLoadBuffer(uint64_t Cycle);
+  void DispatchToLoadBufferTree(uint64_t Cycle);
+
   void DispatchToStoreBuffer(uint64_t Cycle);
   void DispatchToLineFillBuffer(uint64_t Cycle);
   
   uint64_t FindIssueCycleWhenLoadBufferIsFull();
+  uint64_t FindIssueCycleWhenLoadBufferTreeIsFull();
+
   uint64_t FindIssueCycleWhenStoreBufferIsFull();
   uint64_t FindIssueCycleWhenLineFillBufferIsFull();
   

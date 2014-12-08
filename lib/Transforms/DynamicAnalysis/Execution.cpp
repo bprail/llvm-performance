@@ -262,7 +262,7 @@ bool EnginePass::runOnModule(Module &M)
                         if (Constant* cint = dyn_cast<Constant>(v))
                         {
                             unsigned int bbid = cint->getUniqueInteger().getLimitedValue((0x1 << 24));
-                            basicBlockMap[bbid] = &B;
+                            basicBlockMap[bbid] = dyn_cast<BasicBlock>(&B);
                             errs() << "Found - " << bbid << "\n";
                             break;
                         }
@@ -286,6 +286,7 @@ bool EnginePass::runOnModule(Module &M)
     unsigned int bbcount = 0;
     while (Task* currentTask = tg->getNextTask())
     {
+        if (currentTask->getContextId() != 1) { delete currentTask; continue;}
         switch(currentTask->getType())
         {
             case task_type_basic_blocks:
@@ -378,7 +379,6 @@ bool EnginePass::runOnModule(Module &M)
     
         delete currentTask;
     }
-    
     Analyzer->finishAnalysis();
     
     return false;
