@@ -2,10 +2,10 @@
 //
 //                     The LLVM Compiler Infrastructure
 //
-//  Vtetoria Caparros Cabezas <caparrov@inf.ethz.ch>
+//  Victoria Caparros Cabezas <caparrov@inf.ethz.ch>
 //===----------------------------------------------------------------------===//
 
-//#define INTERPRETER
+#define INTERPRETER
 
 #ifdef INTERPRETER
 #include "llvm/Support/DynamicAnalysis.h"
@@ -14,7 +14,7 @@
 #endif
 
 #ifndef INTERPRETER
-//#define DEBUG_TYPE "dynamic-analysis"
+#define DEBUG_TYPE "dynamic-analysis"
 #endif
 
 //===----------------------------------------------------------------------===//
@@ -75,6 +75,19 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
     for (unsigned i = 0; i < nNodes; i++)
       ExecutionUnit.push_back(0);
     
+#ifdef INT_FP_OPS
+    for (unsigned i = 0; i < 4; i++) {
+      Beta.push_back(-1);
+      Q.push_back(0);
+    }
+    Q.push_back(0);
+#endif
+#ifdef INT_FP_OPS
+    ExecutionUnit[INT_ADD_NODE] = INT_ADDER;
+    ExecutionUnit[INT_MUL_NODE] = INT_MULTIPLIER;
+    ExecutionUnit[INT_DIV_NODE] = INT_DIVIDER;
+    ExecutionUnit[INT_SHUFFLE_NODE] = INT_SHUFFLE;
+#endif
     ExecutionUnit[FP_ADD_NODE] = FP_ADDER;
     ExecutionUnit[FP_MUL_NODE] = FP_MULTIPLIER;
     ExecutionUnit[FP_DIV_NODE] = FP_DIVIDER;
@@ -102,8 +115,8 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
       DispatchPort.push_back(emptyVector);
     
     /*
-     Port 0 -> FP_ADDER
-     Port 1 -> FP_MULTIPLIER, FP_DIVIDER, FP_SHUFFLE
+     Port 0 -> FP_ADDER, INT_ADDER
+     Port 1 -> FP_MULTIPLIER, FP_DIVIDER, FP_SHUFFLE, INT_MULTIPLIER, INT_DIVIDER, INT_SHUFFLE
      Port 2 -> STORE_CHANNEL (L1, L2, L3 and MEM)
      Port 3 -> LOAD (L1, L2, L3 and MEM)
      Port 4 -> LOAD (L1, L2, L3 and MEM)
@@ -111,6 +124,21 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
     // Associate Dispatch ports to nodes instead of execution resources. Because
     // otherwise there is a problem when different nodes share execution unit
     // but no dispatch ports
+    
+#ifdef INT_FP_OPS
+    emptyVector.push_back(0);
+    DispatchPort[INT_ADD_NODE] = emptyVector;
+    emptyVector.clear();
+    emptyVector.push_back(1);
+    DispatchPort[INT_MUL_NODE] = emptyVector;
+    emptyVector.clear();
+    emptyVector.push_back(1);
+    DispatchPort[INT_DIV_NODE] = emptyVector;
+    emptyVector.clear();
+    emptyVector.push_back(1);
+    DispatchPort[INT_SHUFFLE_NODE] = emptyVector;
+    emptyVector.clear();
+#endif
     emptyVector.push_back(0);
     DispatchPort[FP_ADD_NODE] = emptyVector;
     emptyVector.clear();
@@ -166,7 +194,6 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
     nStoreAGUs = ATOM_STORE_AGUS;
   }
   
-  
   // =================== Some general checkings ================================//
   
   if(!ExecutionUnitsLatency.empty() && ExecutionUnitsLatency.size() !=
@@ -180,11 +207,11 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
   if(!ExecutionUnitsParallelIssue.empty() && ExecutionUnitsParallelIssue.size() !=
      nExecutionUnits)
     report_fatal_error("The number of execution units parallel issue does not match the number of execution units");
-  if (L1CacheSize < CacheLineSize)
+  if (L1CacheSize != 0 && L1CacheSize < CacheLineSize)
     report_fatal_error("L1 cache size < cache line size");
-  if (L2CacheSize < CacheLineSize)
+  if (L2CacheSize!= 0 && L2CacheSize < CacheLineSize)
     report_fatal_error("L2 cache size < cache line size");
-  if (LLCCacheSize < CacheLineSize)
+  if (LLCCacheSize != 0 && LLCCacheSize < CacheLineSize)
     report_fatal_error("LLC cache size < cache line size");
   
   if (CacheLineSize % MemoryWordSize != 0)
@@ -202,6 +229,7 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
   this->L1CacheSize = this->L1CacheSize /CacheLineSize;
   this->L2CacheSize = this->L2CacheSize/CacheLineSize;
   this->LLCCacheSize = this->LLCCacheSize/CacheLineSize;
+  
   
   this->AddressGenerationUnits = AddressGenerationUnits;
   this->ReservationStationSize = ReservationStationSize;
@@ -226,7 +254,6 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
   MaxDispatchToLoadBufferQueueTree = 0;
   
   BitsPerCacheLine = log2(this->CacheLineSize * (this->MemoryWordSize));
-  
   
   
   // In reality is if L2, but need to specify the size for the reuse disrance
@@ -283,14 +310,16 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
   }
   
   VectorWidth = 1;
-  
-  
- 
-  
+  SourceCodeLine = 0;
   
   
   // Make sure that there are no more parallel execution units that dispatch ports associated
   // to these units
+  if (ExecutionUnitsParallelIssue.empty() == true) {
+    for (unsigned i = 0; i < nCompNodes +nMemNodes; i++) { // Dispatch ports are associated to nodes
+      ExecutionUnitsParallelIssue.push_back(-1);
+    }
+  }
   for (unsigned i = 0; i < nCompNodes +nMemNodes; i++) { // Dispatch ports are associated to nodes
     if (ExecutionUnitsParallelIssue[ExecutionUnit[i]] > 0 && DispatchPort[i].size() < (unsigned)ExecutionUnitsParallelIssue[ExecutionUnit[i]]) {
       DEBUG(dbgs() << "ExecutionUnit " << i << "\n");
@@ -299,7 +328,6 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
       report_fatal_error("There are more execution units that ports that can dispatch them\n");
     }
   }
-  
   if (!MemAccessGranularity.empty() && MemAccessGranularity.size() != nMemExecutionUnits)
     report_fatal_error("Mem access granularities do not match the number of memory execution units");
   
@@ -316,6 +344,7 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
       AccessGranularities.push_back(this->MemoryWordSize);
     }
   }
+  
   
   if (!ExecutionUnitsLatency.empty()){
     for (unsigned i = 0; i< nExecutionUnits; i++)
@@ -335,6 +364,9 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
   if (!MemAccessGranularity.empty())
     for (unsigned i = 0; i< nMemExecutionUnits; i++)
       AccessGranularities[i+nCompExecutionUnits] = MemAccessGranularity[i];
+  
+  
+  
   
   // Latency and throughput of AGUs
   if (nAGUs > 0) {
@@ -395,11 +427,43 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
     
     if (i < nCompExecutionUnits){
       AccessWidth = VectorWidth;
+      // Computational units throughput must also be rounded
+      if(this->ExecutionUnitsThroughput[i]!= INF){
+        if (this->ExecutionUnitsThroughput[i] >= 1){
+          this->ExecutionUnitsThroughput[i] = roundNextMultiple(this->ExecutionUnitsThroughput[i] , VectorWidth);
+        }
+        
+        
+      }
     }else{
       if (i >= nCompExecutionUnits && i < nCompExecutionUnits + nMemExecutionUnits) {
         AccessWidth = roundNextMultiple(VectorWidth*MemoryWordSize, AccessGranularities[i]);
-        // Round throughput of memory resources to the next multiple of MemoryWordSize
-        this->ExecutionUnitsThroughput[i] = roundNextMultiple(this->ExecutionUnitsThroughput[i],this->MemoryWordSize);
+        // Round throughput of memory resources to the next multiple of AccessWidth
+        // (before it was MemoryWordSize)
+       	if (this->ExecutionUnitsThroughput[i]!= INF){
+          if (this->ExecutionUnitsThroughput[i] < AccessWidth){
+          // if (this->ExecutionUnitsThroughput[i] < this->MemoryWordSize){
+            if (this->ExecutionUnitsThroughput[i] < 1){
+              float Inverse =ceil(1/this->ExecutionUnitsThroughput[i]);
+              float Rounded =roundNextPowerOfTwo(Inverse);
+              
+              if (Inverse == Rounded) {
+                
+                this->ExecutionUnitsThroughput[i] = float(1)/float(Rounded);
+                
+              }else{
+                
+                this->ExecutionUnitsThroughput[i] = float(1)/float((Rounded/float(2)));
+              }
+            }else{
+              this->ExecutionUnitsThroughput[i] = roundNextPowerOfTwo(ceil(this->ExecutionUnitsThroughput[i]));
+            }
+          }	else{
+            // Round to the next multiple of AccessGranularities...
+            //          this->ExecutionUnitsThroughput[i] = roundNextMultiple(this->ExecutionUnitsThroughput[i],this->MemoryWordSize);
+            this->ExecutionUnitsThroughput[i] = roundNextMultiple(this->ExecutionUnitsThroughput[i],AccessGranularities[i]);
+          }
+        }
       }else{
         AccessWidth = 1;
       }
@@ -417,8 +481,16 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
     DEBUG(dbgs() << "IssueCycleGranularities["<<i<<"]=" << IssueCycleGranularities[i] << "\n");
   }
   
+  
+  
   DEBUG(dbgs() << "Number of resources " << nExecutionUnits + nPorts + nAGUs + nLoadAGUs + nStoreAGUs + nBuffers << "\n");
   
+#ifdef INT_FP_OPS
+  ResourcesNames.push_back("INT_ADDER");
+  ResourcesNames.push_back("INT_MULT");
+  ResourcesNames.push_back("INT_DIV");
+  ResourcesNames.push_back("INT_SHUF");
+#endif
   ResourcesNames.push_back("FP_ADDER");
   ResourcesNames.push_back("FP_MULT");
   ResourcesNames.push_back("FP_DIV");
@@ -449,6 +521,12 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
   ResourcesNames.push_back("LFB");
   
   // Nodes names
+#ifdef INT_FP_OPS
+  NodesNames.push_back("INT_ADD_NODE");
+  NodesNames.push_back("INT_MUL_NODE");
+  NodesNames.push_back("INT_DIV_NODE");
+  NodesNames.push_back("INT_SHUFFLE_NODE");
+#endif
   NodesNames.push_back("FP_ADD_NODE");
   NodesNames.push_back("FP_MUL_NODE");
   NodesNames.push_back("FP_DIV_NODE");
@@ -543,6 +621,7 @@ DynamicAnalysis::DynamicAnalysis(string TargetFunction,
   for (unsigned i = 0; i< nExecutionUnits + nPorts + nAGUs + nLoadAGUs + nStoreAGUs; i++)
     AvailableCyclesTree.push_back(NULL);
   
+  
 }
 
 
@@ -569,8 +648,7 @@ return FP_##TY##_32_BITS;  \
 case Type::DoubleTyID:  \
 return FP_##TY##_64_BITS; \
 case Type::IntegerTyID: \
-IntegerTy = dyn_cast<IntegerType>(PT-> getElementType());  \
-switch (IntegerTy -> getBitWidth()){  \
+switch (PT->getElementType()->getVectorElementType()->getIntegerBitWidth()) { \
 case 4: return INT_##TY##_4_BITS; \
 case 8: return INT_##TY##_8_BITS; \
 case 16: return INT_##TY##_16_BITS; \
@@ -829,6 +907,17 @@ DynamicAnalysis::insertMemoryAddressIssueCycle(uint64_t v,uint64_t Cycle ){
 }
 
 
+uint64_t
+DynamicAnalysis::GetTreeChunk(uint64_t i){
+  
+  uint64_t TreeChunk = i/SplitTreeRange;
+  if (TreeChunk >= FullOccupancyCyclesTree.size()) {
+    for (unsigned j = FullOccupancyCyclesTree.size(); j<= TreeChunk; j++) {
+      FullOccupancyCyclesTree.push_back(NULL);
+    }
+  }
+  return TreeChunk;
+}
 
 unsigned
 DynamicAnalysis::FindNextAvailableIssueCyclePortAndThroughtput(unsigned InstructionIssueCycle, unsigned ExtendedInstructionType, unsigned NElementsVector){
@@ -842,22 +931,25 @@ DynamicAnalysis::FindNextAvailableIssueCyclePortAndThroughtput(unsigned Instruct
   bool FoundInPort = false;
   
   while (FoundInThroughput == false || FoundInPort == false) {
+#ifdef DEBUG_GENERIC
     DEBUG(dbgs() << "Starting while\n");
     DEBUG(dbgs() << "FoundInThroughput " << FoundInThroughput << "\n");
     DEBUG(dbgs() << "FoundInPort " << FoundInPort << "\n");
-    
+#endif
     // First, find next available issue cycle based on node throughput
     InstructionIssueCycleThroughputAvailable = FindNextAvailableIssueCycle(InstructionIssueCyclePortAvailable, ExecutionResource, ExtendedInstructionType, NElementsVector);
     if(InstructionIssueCycleThroughputAvailable == InstructionIssueCyclePortAvailable)
       FoundInThroughput = true;
     
-    
+#ifdef DEBUG_GENERIC
     DEBUG(dbgs() << "Available cycle in my level " << InstructionIssueCycleThroughputAvailable << "\n");
-    
+#endif
     // Check that the port is available
     // Get the ports to which this node binds
     for (unsigned i = 0; i < DispatchPort[ExtendedInstructionType].size(); i++) {
+#ifdef DEBUG_GENERIC
       DEBUG(dbgs() << "Checking availability in port " << ResourcesNames[ExecutionPort[DispatchPort[ExtendedInstructionType][i]]] << "\n");
+#endif
       InstructionIssueCyclePortAvailable = FindNextAvailableIssueCycle(InstructionIssueCycleThroughputAvailable, ExecutionPort[DispatchPort[ExtendedInstructionType][i]], PortNodes[DispatchPort[ExtendedInstructionType][i]]);
       
       if (InstructionIssueCyclePortAvailable!=InstructionIssueCycleThroughputAvailable){
@@ -893,6 +985,186 @@ DynamicAnalysis::FindNextAvailableIssueCyclePortAndThroughtput(unsigned Instruct
 }
 
 
+bool
+DynamicAnalysis::ThereIsAvailableBandwidth(unsigned NextAvailableCycle, unsigned ExecutionResource, bool& FoundInFullOccupancyCyclesTree, bool TargetLevel){
+  
+  bool EnoughBandwidth;
+  float AvailableBandwidth;
+  unsigned AccessWidth;
+  unsigned IssueCycleGranularity = 0;
+  unsigned TmpTreeChunk, TreeChunk;
+  if (TargetLevel==true && FoundInFullOccupancyCyclesTree == false) {
+    
+    AccessWidth = AccessWidths[ExecutionResource];
+    AvailableBandwidth= ExecutionUnitsThroughput[ExecutionResource];
+    
+    IssueCycleGranularity = IssueCycleGranularities[ExecutionResource];
+#ifdef DEBUG_GENERIC
+    DEBUG(dbgs() << "Making sure there is also enough bandwidth...\n");
+    DEBUG(dbgs() << "AccessWidth "<< AccessWidth<<"\n");
+    DEBUG(dbgs() << "AvailableBandwidth "<< AvailableBandwidth<<"\n");
+    DEBUG(dbgs() << "IssueCycleGranularity "<< IssueCycleGranularity<<"\n");
+#endif
+    // Assume initially that there is enough bandwidth
+    EnoughBandwidth = true;
+    
+    //There is enough bandwidth if:
+    // 1. The comp/load/store width fits within the level, or the level is empty.
+    // 2. If IssueCycleGranularity > 1, we have to make sure that there were no instructions
+    // executed with the same IssueCycleGranularity in previous cycles. We have to do this
+    // because we don't include latency cycles in AvailableCyclesTree.
+    int64_t StartingCycle = 0;
+    
+    int64_t tmp = (int64_t)NextAvailableCycle -(int64_t)IssueCycleGranularity+(int64_t)1;
+    
+    if (tmp < 0) {
+      StartingCycle = 0;
+    }else
+      StartingCycle = NextAvailableCycle -IssueCycleGranularity+1;
+    
+#ifdef DEBUG_GENERIC
+    DEBUG(dbgs() << "StartingCycle  "<< StartingCycle<<"\n");
+    DEBUG(dbgs() << "NextAvailableCycle  "<< NextAvailableCycle<<"\n");
+    DEBUG(dbgs() << "tmp  "<< tmp<<"\n");
+#endif
+    for (uint64_t i = StartingCycle; i < NextAvailableCycle; i++) {
+      
+      TmpTreeChunk = GetTreeChunk(i);
+      
+      FullOccupancyCyclesTree[TmpTreeChunk] = splay(i,  FullOccupancyCyclesTree[TmpTreeChunk]);
+      
+      if ( FullOccupancyCyclesTree[TmpTreeChunk]!= NULL && FullOccupancyCyclesTree[TmpTreeChunk]->key == i	&& FullOccupancyCyclesTree[TmpTreeChunk]->BitVector[ExecutionResource]==1) {
+        
+        FoundInFullOccupancyCyclesTree = true;
+        EnoughBandwidth  = false;
+        //Every time NextAvailableCycle changes, we need to update TreeChunk
+        TreeChunk = GetTreeChunk(NextAvailableCycle);
+        
+        TreeChunk = NextAvailableCycle/SplitTreeRange;
+        
+#ifdef DEBUG_GENERIC
+        DEBUG(dbgs() << "There is not enough bandwidth because of issue cycle granularity in previous cycles\n");
+#endif
+        break;
+      }
+    }
+    
+    // 3. The same as 2 but for next cycles. If there were loads executed on those cycles,
+    // there would not be available bandwith for the current load.
+    for (uint64_t i = NextAvailableCycle+1; i < NextAvailableCycle +IssueCycleGranularity; i++) {
+#ifdef DEBUG_GENERIC
+      DEBUG(dbgs() << "Checking full occupancy in cycle "<< i<<"\n");
+#endif
+      TmpTreeChunk = GetTreeChunk(i);
+      
+      FullOccupancyCyclesTree[TmpTreeChunk] = splay(i,  FullOccupancyCyclesTree[TmpTreeChunk]);
+      
+      if ( FullOccupancyCyclesTree[TmpTreeChunk]!= NULL && FullOccupancyCyclesTree[TmpTreeChunk]->key == i	&&
+          FullOccupancyCyclesTree[TmpTreeChunk]->BitVector[ExecutionResource]==1) {
+#ifdef DEBUG_GENERIC
+        DEBUG(dbgs() << "There is not enough bandwidth because of issue cycle granularity in later cycles\n");
+        DEBUG(dbgs() << "Cycle " << i << " is in full\n");
+#endif
+        FoundInFullOccupancyCyclesTree = true;
+        EnoughBandwidth = false;
+        
+        TreeChunk = GetTreeChunk(NextAvailableCycle);
+        
+#ifdef DEBUG_GENERIC
+        DEBUG(dbgs() << "NextAvailableCycle " << NextAvailableCycle << "\n");
+#endif
+        break;
+      }
+    }
+  }else{
+    EnoughBandwidth = true;
+  }
+  
+  //dbgs() <<  "There is available BW? " << EnoughBandwidth << "\n";
+  return EnoughBandwidth;
+}
+
+
+
+uint64_t
+DynamicAnalysis::FindNextAvailableIssueCycleUntilNotInFullOrEnoughBandwidth(unsigned NextCycle, unsigned ExecutionResource , bool& FoundInFullOccupancyCyclesTree, bool& EnoughBandwidth){
+  
+  
+  unsigned NextAvailableCycle = NextCycle;
+  unsigned OriginalCycle;
+  Tree<uint64_t> * Node = AvailableCyclesTree[ExecutionResource];
+  unsigned TreeChunk;
+  Tree<uint64_t> * LastNodeVisited = NULL;
+  
+  NextAvailableCycle++;
+  
+#ifdef DEBUG_GENERIC
+  DEBUG(dbgs() << "Searching NextAvailableCycle for " << NextAvailableCycle << "\n");
+#endif
+  OriginalCycle = NextAvailableCycle;
+  
+  // If we loop over the first while because there is not enough bandwidth,
+  // Node might be NULL because this loop has already been executed.
+  Node = AvailableCyclesTree[ExecutionResource];
+  
+  while( Node ) {
+    
+    if( Node->key > NextAvailableCycle){
+      if (NextAvailableCycle == OriginalCycle){ // i.e., it is the first iteration
+        NextAvailableCycle = Node-> key;
+        LastNodeVisited = Node;
+        
+      }
+      // Search for a smaller one
+      Node = Node->left;
+    }else if( Node->key < NextAvailableCycle){
+      // We comment this out because this will never happen in NextAvailable because
+      // for every full node we always insert the next available. The general
+      // algorithm that finds the larger, if it exist, should have this code
+      // uncommented.
+      //UNCOMMENT THIS!!
+      /*  if (NextAvailableCycle == OriginalCycle){
+       NextAvailableCycle = Node->key;
+       LastNodeVisited = Node;
+       }*/
+      if (Node->key == OriginalCycle) {
+        NextAvailableCycle = OriginalCycle;
+        LastNodeVisited = Node;
+        
+        
+        break;
+      }else if (Node->key > OriginalCycle) {
+        //Search for a even smaller one
+        NextAvailableCycle =Node-> key;
+        LastNodeVisited = Node;
+        
+        // Search for a smaller one
+        Node = Node-> left;
+      }else{ //Node->key < OriginalCycle
+        // Search for a larger one, but do not store last node visited...
+        Node = Node-> right;
+      }
+    }else{ //Node->key = NextAvailableCycle
+      NextAvailableCycle = Node->key;
+      LastNodeVisited = Node;
+      break;
+    }
+  }
+  
+  //LastNodeVisited contains the next available cycle. But we still need to check
+  //that it is available for lower and upper levels.
+  NextAvailableCycle = LastNodeVisited->key;
+  
+  TreeChunk = GetTreeChunk(NextAvailableCycle);
+  
+#ifdef DEBUG_GENERIC
+  DEBUG(dbgs() << "NextAvailableCycle " << NextAvailableCycle << "\n");
+#endif
+  FoundInFullOccupancyCyclesTree = true;
+  EnoughBandwidth = false;
+  return NextAvailableCycle;
+  
+}
 // Find next available issue cycle depending on resource availability.
 // Returns a pointer
 unsigned
@@ -900,23 +1172,16 @@ DynamicAnalysis::FindNextAvailableIssueCycle(unsigned OriginalCycle, unsigned Ex
                                              bool TargetLevel){
   
   uint64_t NextAvailableCycle = OriginalCycle;
-  Tree<uint64_t> * Node = AvailableCyclesTree[ExecutionResource];
-  Tree<uint64_t> * LastNodeVisited = NULL;
-  unsigned IssueCycleGranularity = 0, AccessWidth;
-  float AvailableBandwidth;
+  
+  
+  
   bool FoundInFullOccupancyCyclesTree = true;
   bool EnoughBandwidth = false;
-  unsigned TmpTreeChunk;
   // Get the node, if any, corresponding to this issue cycle.
-  unsigned TreeChunk = NextAvailableCycle/SplitTreeRange;
-  if (TreeChunk >= (unsigned)FullOccupancyCyclesTree.size()) {
-    for (unsigned i = FullOccupancyCyclesTree.size(); i<= TreeChunk; i++) {
-      DEBUG(dbgs() << "Iserting element in FullOccupancyCyclesTree");
-      FullOccupancyCyclesTree.push_back(NULL);
-    }
-  }
+  unsigned TreeChunk = GetTreeChunk(NextAvailableCycle);
   
-  // If full is null, then it is available for sure
+  // If full is null, then it is available for sure -> WRONG! It might happen that FULL is NULL because
+  // a new chunk was created.
   // If it is not NULL and there is something scheduled in this cycle..
   // (we don't include the condition FullOccupancyNode->BitVector[ExecutionResource]==1
   // here because it could happen that it cannot be executed because of throughput<1
@@ -924,18 +1189,28 @@ DynamicAnalysis::FindNextAvailableIssueCycle(unsigned OriginalCycle, unsigned Ex
   if (FullOccupancyCyclesTree[TreeChunk] != NULL) {
     
     FullOccupancyCyclesTree[TreeChunk] = splay(NextAvailableCycle, FullOccupancyCyclesTree[TreeChunk]);
-    
+#ifdef DEBUG_GENERIC
     DEBUG(dbgs() << "Full is not NULL \n");
-    
+    DEBUG(dbgs() << "Size of fulloccupacy " << FullOccupancyCyclesTree.size() << "\n");
+    DEBUG(dbgs() << "key of fulloccupacy " << FullOccupancyCyclesTree[TreeChunk]->key << "\n");
+    DEBUG(dbgs() << "ExecutionResource " <<ExecutionResource << "\n");
+    DEBUG(dbgs() << "bitvector of fulloccupacy " <<FullOccupancyCyclesTree[TreeChunk]->BitVector[ExecutionResource] << "\n");
+#endif
     while( FoundInFullOccupancyCyclesTree == true && EnoughBandwidth ==false){
       // Check if it is in full, but firs make sure full is not NULL (it could happen it is NULL after
       // changing the NextAvailableCycle).
       if (FullOccupancyCyclesTree[TreeChunk] !=NULL) {
         if ( FullOccupancyCyclesTree[TreeChunk]->key == NextAvailableCycle && FullOccupancyCyclesTree[TreeChunk]->BitVector[ExecutionResource]==1) {
+#ifdef DEBUG_GENERIC
           DEBUG(dbgs() << "Cycle " << NextAvailableCycle << " found in FullOccupancyCyclesTree\n");
+          
+#endif
           FoundInFullOccupancyCyclesTree = true;
         }else{
+#ifdef DEBUG_GENERIC
           DEBUG(dbgs() << "Cycle " << NextAvailableCycle << " not found in FullOccupancyCyclesTree\n");
+          
+#endif
           FoundInFullOccupancyCyclesTree = false;
         }
       }else{
@@ -948,179 +1223,18 @@ DynamicAnalysis::FindNextAvailableIssueCycle(unsigned OriginalCycle, unsigned Ex
       // there is enough bandwidth (to avoid having large trees, we don't include
       // the latency cycles, so we have to make sure we don't issue in in latency cycles)
       if (ExecutionResource <= nExecutionUnits) {
-        
+#ifdef DEBUG_GENERIC
         DEBUG(dbgs() << "ExecutionResource <= nExecutionUnits\n");
         DEBUG(dbgs() << "ExecutionResource "<< ExecutionResource<<"\n");
         DEBUG(dbgs() << "nExecutionUnits "<< nExecutionUnits<<"\n");
-        
-        if (TargetLevel==true && FoundInFullOccupancyCyclesTree == false) {
-          
-          
-          DEBUG(dbgs() << "Making sure there is also enough bandwidth...\n");
-          
-          AccessWidth = AccessWidths[ExecutionResource];
-          AvailableBandwidth= ExecutionUnitsThroughput[ExecutionResource];
-          
-          IssueCycleGranularity = IssueCycleGranularities[ExecutionResource];
-          
-          DEBUG(dbgs() << "AccessWidth "<< AccessWidth<<"\n");
-          DEBUG(dbgs() << "AvailableBandwidth "<< AvailableBandwidth<<"\n");
-          DEBUG(dbgs() << "IssueCycleGranularity "<< IssueCycleGranularity<<"\n");
-          
-          // Assume initially that there is enough bandwidth
-          EnoughBandwidth = true;
-          
-          //There is enough bandwidth if:
-          // 1. The comp/load/store width fits within the level, or the level is empty.
-          // 2. If IssueCycleGranularity > 1, we have to make sure that there were no instructions
-          // executed with the same IssueCycleGranularity in previous cycles. We have to do this
-          // because we don't include latency cycles in AvailableCyclesTree.
-          int64_t StartingCycle = 0;
-          int64_t tmp = NextAvailableCycle -IssueCycleGranularity+1;
-          
-          if (tmp < 0) {
-            StartingCycle = 0;
-          }else
-            StartingCycle = NextAvailableCycle -IssueCycleGranularity+1;
-          
-          DEBUG(dbgs() << "StartingCycle  "<< StartingCycle<<"\n");
-          DEBUG(dbgs() << "NextAvailableCycle  "<< NextAvailableCycle<<"\n");
-          
-          for (uint64_t i = StartingCycle; i < NextAvailableCycle; i++) {
-            
-            TmpTreeChunk = i/SplitTreeRange;
-            if (TmpTreeChunk >= FullOccupancyCyclesTree.size()) {
-              for (unsigned j = FullOccupancyCyclesTree.size(); j<= TmpTreeChunk; j++) {
-                FullOccupancyCyclesTree.push_back(NULL);
-              }
-            }
-            
-            FullOccupancyCyclesTree[TmpTreeChunk] = splay(i,  FullOccupancyCyclesTree[TmpTreeChunk]);
-            
-            if ( FullOccupancyCyclesTree[TmpTreeChunk]!= NULL && FullOccupancyCyclesTree[TmpTreeChunk]->key == i	&& FullOccupancyCyclesTree[TmpTreeChunk]->BitVector[ExecutionResource]==1) {
-              
-              FoundInFullOccupancyCyclesTree = true;
-              EnoughBandwidth  = false;
-              //Every time NextAvailableCycle changes, we need to update TreeChunk
-              TreeChunk = NextAvailableCycle/SplitTreeRange;
-              if (TreeChunk >= FullOccupancyCyclesTree.size()) {
-                for (unsigned j = FullOccupancyCyclesTree.size(); j<= TreeChunk; j++) {
-                  DEBUG(dbgs() << "Inserting element into FullOccupancyCyclesTree\n");
-                  FullOccupancyCyclesTree.push_back(NULL);
-                }
-              }
-              DEBUG(dbgs() << "There is not enough bandwidth because of issue cycle granularity in previous cycles\n");
-              break;
-            }
-          }
-          
-          // 3. The same as 2 but for next cycles. If there were loads executed on those cycles,
-          // there would not be available bandwith for the current load.
-          for (uint64_t i = NextAvailableCycle+1; i < NextAvailableCycle +IssueCycleGranularity; i++) {
-            DEBUG(dbgs() << "Checking full occupancy in cycle "<< i<<"\n");
-            TmpTreeChunk = i/SplitTreeRange;
-            if (TmpTreeChunk >= FullOccupancyCyclesTree.size()) {
-              for (unsigned j = FullOccupancyCyclesTree.size(); j<= TmpTreeChunk; j++) {
-                FullOccupancyCyclesTree.push_back(NULL);
-              }
-            }
-            FullOccupancyCyclesTree[TmpTreeChunk] = splay(i,  FullOccupancyCyclesTree[TmpTreeChunk]);
-            
-            if ( FullOccupancyCyclesTree[TmpTreeChunk]!= NULL && FullOccupancyCyclesTree[TmpTreeChunk]->key == i	&&
-                FullOccupancyCyclesTree[TmpTreeChunk]->BitVector[ExecutionResource]==1) {
-              
-              DEBUG(dbgs() << "There is not enough bandwidth because of issue cycle granularity in later cycles\n");
-              DEBUG(dbgs() << "Cycle " << i << " is in full\n");
-              FoundInFullOccupancyCyclesTree = true;
-              EnoughBandwidth = false;
-              TreeChunk = NextAvailableCycle/SplitTreeRange;
-              
-              if (TreeChunk >= FullOccupancyCyclesTree.size()) {
-                for (unsigned j = FullOccupancyCyclesTree.size(); j<= TreeChunk; j++) {
-                  DEBUG(dbgs() << "Inserting element into FullOccupancyCyclesTree\n");
-                  FullOccupancyCyclesTree.push_back(NULL);
-                }
-              }
-              DEBUG(dbgs() << "NextAvailableCycle " << NextAvailableCycle << "\n");
-              break;
-            }
-          }
-        }else{
-          EnoughBandwidth = true;
-        }
+#endif
+        // NEW CODE INSERTED
+        EnoughBandwidth = ThereIsAvailableBandwidth(NextAvailableCycle, ExecutionResource, FoundInFullOccupancyCyclesTree, TargetLevel);
         
         if (FoundInFullOccupancyCyclesTree == true || EnoughBandwidth == false) {
-          //VCA-Aug next line
-          NextAvailableCycle++;
-          DEBUG(dbgs() << "Searching NextAvailableCycle for " << NextAvailableCycle << "\n");
           
-          OriginalCycle = NextAvailableCycle;
-          
-          // If we loop over the first while because there is not enough bandwidth,
-          // Node might be NULL because this loop has already been executed.
-          Node = AvailableCyclesTree[ExecutionResource];
-          
-          while( Node ) {
-            
-            if( Node->key > NextAvailableCycle){
-              if (NextAvailableCycle == OriginalCycle){ // i.e., it is the first iteration
-                NextAvailableCycle = Node-> key;
-                LastNodeVisited = Node;
-                
-              }
-              // Search for a smaller one
-              Node = Node->left;
-            }else if( Node->key < NextAvailableCycle){
-              // We comment this out because this will never happen in NextAvailable because
-              // for every full node we always insert the next available. The general
-              // algorithm that finds the larger, if it exist, should have this code
-              // uncommented.
-              //UNCOMMENT THIS!!
-              /*  if (NextAvailableCycle == OriginalCycle){
-               NextAvailableCycle = Node->key;
-               LastNodeVisited = Node;
-               }*/
-              if (Node->key == OriginalCycle) {
-                NextAvailableCycle = OriginalCycle;
-                LastNodeVisited = Node;
-                
-                
-                break;
-              }else if (Node->key > OriginalCycle) {
-                //Search for a even smaller one
-                NextAvailableCycle =Node-> key;
-                LastNodeVisited = Node;
-                
-                // Search for a smaller one
-                Node = Node-> left;
-              }else{ //Node->key < OriginalCycle
-                // Search for a larger one, but do not store last node visited...
-                Node = Node-> right;
-              }
-            }else{ //Node->key = NextAvailableCycle
-              NextAvailableCycle = Node->key;
-              LastNodeVisited = Node;
-              break;
-            }
-          }
-          
-          //LastNodeVisited contains the next available cycle. But we still need to check
-          //that it is available for lower and upper levels.
-          NextAvailableCycle = LastNodeVisited->key;
-          
-          TreeChunk = NextAvailableCycle/SplitTreeRange;
-          DEBUG(dbgs() << "TreeChunk = "<<TreeChunk<< "\n");
-          DEBUG(dbgs() << "FullOccupancyCyclesTree.size() = "<<FullOccupancyCyclesTree.size()<< "\n");
-          
-          if (TreeChunk >= FullOccupancyCyclesTree.size()) {
-            for (unsigned i = FullOccupancyCyclesTree.size(); i<= TreeChunk; i++) {
-              DEBUG(dbgs() << "Inserting element into FullOccupancyCyclesTree\n");
-              FullOccupancyCyclesTree.push_back(NULL);
-            }
-          }
-          DEBUG(dbgs() << "NextAvailableCycle " << NextAvailableCycle << "\n");
-          FoundInFullOccupancyCyclesTree = true;
-          EnoughBandwidth = false;
+          // NEW CODE
+          NextAvailableCycle = FindNextAvailableIssueCycleUntilNotInFullOrEnoughBandwidth(NextAvailableCycle, ExecutionResource , FoundInFullOccupancyCyclesTree,EnoughBandwidth);
         }
       }else{
         if (FoundInFullOccupancyCyclesTree ==true) {
@@ -1129,21 +1243,19 @@ DynamicAnalysis::FindNextAvailableIssueCycle(unsigned OriginalCycle, unsigned Ex
             FullOccupancyCyclesTree[TreeChunk] = splay(NextAvailableCycle, FullOccupancyCyclesTree[TreeChunk]);
             //Check if it is in full
             if ( FullOccupancyCyclesTree[TreeChunk] != NULL && FullOccupancyCyclesTree[TreeChunk]->key == NextAvailableCycle && FullOccupancyCyclesTree[TreeChunk]->BitVector[ExecutionResource]==1) {
+#ifdef DEBUG_GENERIC
               DEBUG(dbgs() << "Cycle " << NextAvailableCycle << " found in Full OccupancyCyclesTree\n");
+#endif
               // Try next cycle
               NextAvailableCycle++;
-              TreeChunk = NextAvailableCycle/SplitTreeRange;
-              DEBUG(dbgs() << "TreeChunk "<< TreeChunk<<"\n");
-              DEBUG(dbgs() << "FullOccupancyCyclesTree.size() "<< FullOccupancyCyclesTree.size()<<"\n");
-              if (TreeChunk >= FullOccupancyCyclesTree.size()) {
-                for (unsigned i = FullOccupancyCyclesTree.size(); i<= TreeChunk; i++) {
-                  DEBUG(dbgs() << "Inserting element into FullOccupancyCyclesTree\n");
-                  FullOccupancyCyclesTree.push_back(NULL);
-                }
-              }
+              TreeChunk = GetTreeChunk(NextAvailableCycle);
+              
+              
               FoundInFullOccupancyCyclesTree = true;
             }else{
+#ifdef DEBUG_GENERIC
               DEBUG(dbgs() << "Cycle " << NextAvailableCycle << " not found in Full OccupancyCyclesTree\n");
+#endif
               FoundInFullOccupancyCyclesTree = false;
             }
           }
@@ -1151,6 +1263,28 @@ DynamicAnalysis::FindNextAvailableIssueCycle(unsigned OriginalCycle, unsigned Ex
       }
       
     }
+  }else{
+    if (TreeChunk != 0) {
+      
+      // Full is NULL, but check that TreeChunk is not zero. Otherwise, Full is not really NULL
+      if (ExecutionResource <= nExecutionUnits) {
+#ifdef DEBUG_GENERIC
+        DEBUG(dbgs() << "ExecutionResource <= nExecutionUnits\n");
+        DEBUG(dbgs() << "ExecutionResource "<< ExecutionResource<<"\n");
+        DEBUG(dbgs() << "nExecutionUnits "<< nExecutionUnits<<"\n");
+#endif
+        // NEW CODE INSERTED
+        FoundInFullOccupancyCyclesTree = false;
+        EnoughBandwidth = ThereIsAvailableBandwidth(NextAvailableCycle, ExecutionResource, FoundInFullOccupancyCyclesTree, TargetLevel);
+        
+        if (FoundInFullOccupancyCyclesTree == true || EnoughBandwidth == false) {
+          
+          // NEW CODE
+          NextAvailableCycle = FindNextAvailableIssueCycleUntilNotInFullOrEnoughBandwidth(NextAvailableCycle, ExecutionResource , FoundInFullOccupancyCyclesTree,EnoughBandwidth);
+        }
+      }
+    }
+    
   }
   return NextAvailableCycle;
 }
@@ -1159,10 +1293,7 @@ DynamicAnalysis::FindNextAvailableIssueCycle(unsigned OriginalCycle, unsigned Ex
 
 // Find next available issue cycle depending on resource availability
 bool
-DynamicAnalysis::InsertNextAvailableIssueCycle(uint64_t NextAvailableCycle, unsigned ExecutionResource, uint64_t ExtendedInstructionType, unsigned NElementsVector, bool isPrefetch){
-  
-  
-  DEBUG(dbgs() << "Inserting  NextAvailableCycle " <<  NextAvailableCycle << "\n");
+DynamicAnalysis::InsertNextAvailableIssueCycle(uint64_t NextAvailableCycle, unsigned ExecutionResource, uint64_t ExtendedInstructionType,  unsigned NElementsVector, bool isPrefetch){
   
   Tree<uint64_t> * Node = AvailableCyclesTree[ExecutionResource];
   unsigned NodeIssueOccupancy = 0;
@@ -1193,8 +1324,11 @@ DynamicAnalysis::InsertNextAvailableIssueCycle(uint64_t NextAvailableCycle, unsi
   
   InstructionsLastIssueCycle[ExecutionResource] = max( InstructionsLastIssueCycle[ExecutionResource] ,NextAvailableCycle);
   
-  DEBUG(dbgs() << "Updating InstructionsLastIssueCycle of execution resource " << ResourcesNames[ExecutionResource] << " to " <<InstructionsLastIssueCycle[ExecutionResource]  << "\n");
   
+  
+#ifdef DEBUG_GENERIC
+  DEBUG(dbgs() << "Updating InstructionsLastIssueCycle of execution resource " << ResourcesNames[ExecutionResource] << " to " <<InstructionsLastIssueCycle[ExecutionResource]  << "\n");
+#endif
   // Insert
   // If it exists already in Available... Inserting it has any effect? No, it simply returns a pointer to the node.
   // Here, use ExtendedInstructionType and not InstructioTypeStats because both prefetched loads and normal loads
@@ -1203,11 +1337,15 @@ DynamicAnalysis::InsertNextAvailableIssueCycle(uint64_t NextAvailableCycle, unsi
   // from AvailableCyclesTree.
   
   // if (ExecutionResource <= nExecutionUnits) {
-  
+#ifdef DEBUG_GENERIC
   DEBUG(dbgs() << "Inserting next available issue cycle "<< NextAvailableCycle <<" in execution unit "<< ResourcesNames[ExecutionResource] <<" for Instruction type "<< NodesNames[ExtendedInstructionType]<<"\n");
-  
+#endif
   
   AvailableCyclesTree[ExecutionResource] = insert_node(NextAvailableCycle,  AvailableCyclesTree[ExecutionResource]);
+#ifdef SOURCE_CODE_ANALYSIS
+  DEBUG(dbgs() << "Inserting source code line " << SourceCodeLine << "for cycle " << NextAvailableCycle << " in AvailableCyclesTree due to resource "<<ResourcesNames[ExecutionResource] <<"\n");
+  AvailableCyclesTree[ExecutionResource]->SourceCodeLines.insert(SourceCodeLine);
+#endif
   Node = AvailableCyclesTree[ExecutionResource];
   
   
@@ -1223,7 +1361,6 @@ DynamicAnalysis::InsertNextAvailableIssueCycle(uint64_t NextAvailableCycle, unsi
     
   }else{
     if (AccessWidth <= ExecutionUnitsThroughput[ExecutionResource]) {
-      DEBUG(dbgs() << "Increasing issue Occupancy\n");
       if (isPrefetch) {
         Node->occupancyPrefetch++;
       }else{
@@ -1244,13 +1381,12 @@ DynamicAnalysis::InsertNextAvailableIssueCycle(uint64_t NextAvailableCycle, unsi
     }
   }
   
-  
   /* Copy these values becasue later on the Node is not the same anymore */
   NodeIssueOccupancy = Node->issueOccupancy;
   NodeWidthOccupancy = Node->widthOccupancy;
   NodeOccupancyPrefetch = Node->occupancyPrefetch;
   MaxOccupancy[ExecutionResource] = max(MaxOccupancy[ExecutionResource], NodeIssueOccupancy + NodeOccupancyPrefetch);
-
+  
   
   // If ExecutionUnitsThroughput is INF, the level never gets full
   
@@ -1273,8 +1409,9 @@ DynamicAnalysis::InsertNextAvailableIssueCycle(uint64_t NextAvailableCycle, unsi
   
   if (LevelGotFull) {
     
-   
+#ifdef DEBUG_GENERIC
     DEBUG(dbgs() << "Level got full\n");
+#endif
     LevelGotFull = true;
     
     // Check whether next cycle is in full. because if it is, it should not be inserted into AvailableCyclesTree
@@ -1282,59 +1419,67 @@ DynamicAnalysis::InsertNextAvailableIssueCycle(uint64_t NextAvailableCycle, unsi
     // Here is where the distinction betweeen execution resource and instruction type is important.
     //  unsigned NextCycle = CalculateIssueCycleGranularity(ExecutionResource, NElementsVector);
     unsigned NextCycle = IssueCycleGranularities[ExecutionResource];
-    
+#ifdef DEBUG_GENERIC
     DEBUG(dbgs() << "AccessWidth " << AccessWidth << "\n");
     DEBUG(dbgs() << "Next Cycle " << NextCycle << "\n");
-    
+#endif
     AvailableCyclesTree[ExecutionResource]= delete_node(NextAvailableCycle,  AvailableCyclesTree[ExecutionResource]);
     
     // Insert node in FullOccupancy
     //    FullOccupancyCyclesTree = insert_node(NextAvailableCycle,)
+#ifdef DEBUG_GENERIC
     DEBUG(dbgs() << "Inserting in FullOccupancyCyclesTree of type " << ResourcesNames[ExecutionResource] << " node with key "<< NextAvailableCycle<<"\n");
-    unsigned TreeChunk = NextAvailableCycle/SplitTreeRange;
-    if (TreeChunk >= FullOccupancyCyclesTree.size()) {
-      for (unsigned i = FullOccupancyCyclesTree.size(); i<= TreeChunk; i++) {
-        DEBUG(dbgs() << "Inserting element into FullOccupancyCyclesTree\n");
-        FullOccupancyCyclesTree.push_back(NULL);
-      }
-    }
-    FullOccupancyCyclesTree[TreeChunk] =insert_node(NextAvailableCycle, ExecutionResource, FullOccupancyCyclesTree[TreeChunk]);
+#endif
+    unsigned TreeChunk = GetTreeChunk(NextAvailableCycle);
     
+    FullOccupancyCyclesTree[TreeChunk] =insert_node(NextAvailableCycle, ExecutionResource, FullOccupancyCyclesTree[TreeChunk]);
+#ifdef SOURCE_CODE_ANALYSIS
+#ifdef DEBUG_SOURCE_CODE_ANALYSIS
+    DEBUG(dbgs() << "Inserting source code line " << SourceCodeLine << " for cycle " << NextAvailableCycle << " in FullOccupancyTree due to resource "<<ResourcesNames[ExecutionResource] <<"\n");
+#endif
+    FullOccupancyCyclesTree[TreeChunk]->SourceCodeLines.insert(SourceCodeLine);
+    
+#endif
+#ifdef DEBUG_GENERIC
+    DEBUG(dbgs() <<"ExecutionResource = " << ExecutionResource << "\n");
     DEBUG(dbgs() <<"FullOccupancyCyclesTree->BitVector[ExecutionResource] = " << FullOccupancyCyclesTree[TreeChunk]->BitVector[ExecutionResource] << "\n");
     
     // We don't need to do this anymore because it will be larger than LastIssueCycle - TODO
     // Do it only if NextAvailableCycle+1 == InstructionsLastIssueCycle
     // Insert if it is not in full
     DEBUG(dbgs() << "Checking if key "<< NextAvailableCycle + NextCycle <<" is in Full Occupancy Tree\n");
-    TreeChunk = (NextAvailableCycle+NextCycle)/SplitTreeRange;
-    if (TreeChunk >= FullOccupancyCyclesTree.size()) {
-      for (unsigned i = FullOccupancyCyclesTree.size(); i<= TreeChunk; i++) {
-        DEBUG(dbgs() << "Inserting element into FullOccupancyCyclesTree\n");
-        FullOccupancyCyclesTree.push_back(NULL);
-      }
-    }
+#endif
+    
+    TreeChunk = GetTreeChunk(NextAvailableCycle+NextCycle);
+    
+#ifdef DEBUG_GENERIC
     DEBUG(dbgs() << "FullOccupancyCyclesTree.size() "<<FullOccupancyCyclesTree.size() <<"\n");
     DEBUG(dbgs() << "TreeChunk "<< TreeChunk <<"\n");
-    
+#endif
     // Instead of splay, we need insert_node
     FullOccupancyCyclesTree[TreeChunk] = splay(NextAvailableCycle+NextCycle/*1*/,  FullOccupancyCyclesTree[TreeChunk]);
-    
+#ifdef DEBUG_GENERIC
     if (FullOccupancyCyclesTree[TreeChunk] == NULL)
       DEBUG(dbgs() << "FullOccupancyCyclesTree[TreeChunk] == NULL\n");
-    
+#endif
     if (FullOccupancyCyclesTree[TreeChunk] == NULL || (FullOccupancyCyclesTree[TreeChunk]!=NULL && !(FullOccupancyCyclesTree[TreeChunk]->key == NextAvailableCycle+NextCycle &&
                                                                                                      FullOccupancyCyclesTree[TreeChunk]->BitVector[ExecutionResource] ==1) )) {
+#ifdef DEBUG_GENERIC
       DEBUG(dbgs() << "The next node was not in full, so insert in available " << NextAvailableCycle+NextCycle << "\n");
-      
+#endif
       AvailableCyclesTree[ExecutionResource] = insert_node(NextAvailableCycle+NextCycle,  AvailableCyclesTree[ExecutionResource]);
+      
+      // In this case, althought we are inserting a node into AvailableCycles, we don't insert the source
+      // code line associated to the cycle beacuse it does not mean that an instruction has actually been
+      // scheduled in NextAvailableCycle+NextCycle. In this case it just means that this is the next
+      // available cycle. Actually, IssueOccupacy of this new level should be zero.
       
       //Update LastIssueCycle -> Distinguish prefetch loads/stores!!
       InstructionsLastIssueCycle[ExecutionResource] = max( InstructionsLastIssueCycle[ExecutionResource] ,NextAvailableCycle+NextCycle);
-      
+#ifdef DEBUG_GENERIC
       DEBUG(dbgs() << "Updating InstructionsLastIssueCycle of execution resource " << ResourcesNames[ExecutionResource] << " to " <<InstructionsLastIssueCycle[ExecutionResource]  << "\n");
-      
-    }else
-      DEBUG(dbgs() << "key found in FullOccupancyTree\n");
+#endif
+    }
   }
   //}else{
   //  FullOccupancyCyclesTree[NextAvailableCycle/SplitTreeRange] =insert_node(NextAvailableCycle, ExecutionResource, FullOccupancyCyclesTree[NextAvailableCycle/SplitTreeRange]);
@@ -1357,11 +1502,7 @@ DynamicAnalysis::ReuseDistance(uint64_t Last, uint64_t Current, uint64_t address
   int PrefetchReuseTreeDistance = 0;
   if(L1CacheSize != 0){ // Otherwise, does not matter the distance, it is mem access
     
-    DEBUG(dbgs() << "Size of reuse tree " << node_size(ReuseTree) << "\n");
-    
     int ReuseTreeDistance = ReuseTreeSearchDelete(Last, address, false);
-    
-    DEBUG(dbgs() << "Memory op reuse distance in ReuseTree " << ReuseTreeDistance << "\n");
     
     if (SpatialPrefetcher == true) {
       bool IsInPrefetchReuseTree = false;
@@ -1371,7 +1512,6 @@ DynamicAnalysis::ReuseDistance(uint64_t Last, uint64_t Current, uint64_t address
       int PrefetchReuseTreeSizeBefore = PrefetchReuseTreeSize;
       PrefetchReuseTreeDistance = ReuseTreeSearchDelete(Last, address, true);
       
-      DEBUG(dbgs() << "PrefetchReuseTreeDistance  "<<PrefetchReuseTreeDistance<<"\n");
       
       // int PrefetchReuseTreeSizeAfter = tree_size(PrefetchReuseTree);
       int PrefetchReuseTreeSizeAfter = PrefetchReuseTreeSize;
@@ -1435,9 +1575,7 @@ DynamicAnalysis::ReuseDistance(uint64_t Last, uint64_t Current, uint64_t address
       PrefetchReuseTreeSize++;
     }
     
-#ifdef DEBUG_REUSE_DISTANCE
-    DEBUG(dbgs() << "Memory op reuse distance " << Distance << "\n");
-#endif
+    
   }else{
     ReuseTree = insert_node(address,ReuseTree, address);
   }
@@ -1539,6 +1677,11 @@ DynamicAnalysis::updateReuseDistanceDistribution(int Distance, uint64_t Instruct
 #endif
 }
 
+unsigned int
+DynamicAnalysis::DivisionRoundUp(float a, float b){
+  return (a * b + (a+b) / 2) / (a+b);
+}
+
 
 
 // compute the next highest power of 2 of 32-bit v.
@@ -1600,7 +1743,61 @@ DynamicAnalysis::GetMemoryInstructionType(int ReuseDistance, uint64_t MemoryAddr
   
 }
 
-
+unsigned
+DynamicAnalysis::GetPositionSourceCodeLineInfoVector(uint64_t Resource){
+  switch (Resource) {
+    case FP_ADDER:
+      return 0;
+      break;
+    case FP_MULTIPLIER:
+      return 2;
+      break;
+    case FP_DIVIDER:
+      return 4;
+      break;
+    case FP_SHUFFLE:
+      return 6;
+      break;
+      
+    case L1_LOAD_CHANNEL:
+      return 8;
+      break;
+    case L1_STORE_CHANNEL:
+      return 10;
+      break;
+    case L2_LOAD_CHANNEL:
+      return 12;
+      break;
+      
+    case L3_LOAD_CHANNEL:
+      return 14;
+      break;
+      
+    case MEM_LOAD_CHANNEL:
+      return 16;
+      break;
+      
+    case RS_STALL:
+      return 17;
+      break;
+    case ROB_STALL:
+      return 18;
+      break;
+    case LB_STALL:
+      return 19;
+      break;
+    case SB_STALL:
+      return 20;
+      break;
+    case LFB_STALL:
+      return 21;
+      break;
+    default:
+      dbgs() << "Resource: " << ResourcesNames[Resource] << "\n";
+      report_fatal_error("Unknown resource while retrieving source code line information.");
+      break;
+  }
+}
 
 unsigned
 DynamicAnalysis::GetExtendedInstructionType(int OpCode, int ReuseDistance){
@@ -1608,6 +1805,32 @@ DynamicAnalysis::GetExtendedInstructionType(int OpCode, int ReuseDistance){
   unsigned InstructionType = 0;
   
   switch (OpCode) {
+    case Instruction::Add:
+#ifdef INT_FP_OPS
+      return INT_ADD_NODE;
+#else
+      report_fatal_error("Instruction type not associated with a node");
+#endif
+      
+    case Instruction::Sub:
+#ifdef INT_FP_OPS
+      return INT_ADD_NODE;
+#else
+      report_fatal_error("Instruction type not associated with a node");
+#endif
+    case  Instruction::Mul:
+#ifdef INT_FP_OPS
+      return INT_MUL_NODE;
+#else
+      report_fatal_error("Instruction type not associated with a node");
+#endif
+    case Instruction::UDiv:
+    case Instruction::SDiv:
+#ifdef INT_FP_OPS
+      return INT_DIV_NODE;
+#else
+      report_fatal_error("Instruction type not associated with a node");
+#endif
     case Instruction::FAdd:
       return FP_ADD_NODE;
       
@@ -1694,7 +1917,6 @@ DynamicAnalysis::GetMinCompletionCycleLoadBuffer(){
 
 uint64_t
 DynamicAnalysis::GetMinCompletionCycleLoadBufferTree(){
-  
   return MinLoadBuffer;
   //return min(LoadBufferCompletionCyclesTree);
 }
@@ -1744,10 +1966,11 @@ DynamicAnalysis::isStallCycle(int ResourceType, uint64_t Level){
 
 
 bool
-DynamicAnalysis::IsEmptyLevel(unsigned ExecutionResource, uint64_t Level, bool WithPrefetch){
+DynamicAnalysis::IsEmptyLevel(unsigned ExecutionResource, uint64_t Level, bool& IsInAvailableCyclesTree,
+                              bool& IsInFullOccupancyCyclesTree, bool WithPrefetch){
   
-  bool IsInAvailableCyclesTree = false;
-  bool IsInFullOccupancyCyclesTree = false;
+  // bool IsInAvailableCyclesTree = false;
+  // bool IsInFullOccupancyCyclesTree = false;
   
   if (ExecutionResource <= nExecutionUnits) {
     if (AvailableCyclesTree[ExecutionResource]!= NULL) {
@@ -1761,6 +1984,7 @@ DynamicAnalysis::IsEmptyLevel(unsigned ExecutionResource, uint64_t Level, bool W
   }else
     IsInAvailableCyclesTree = false;
   
+  
   int TreeChunk = Level/SplitTreeRange;
   if (FullOccupancyCyclesTree[TreeChunk]!= NULL) {
     FullOccupancyCyclesTree[TreeChunk] = splay(Level, FullOccupancyCyclesTree[TreeChunk]);
@@ -1769,6 +1993,7 @@ DynamicAnalysis::IsEmptyLevel(unsigned ExecutionResource, uint64_t Level, bool W
       IsInFullOccupancyCyclesTree = true;
     }
   }
+  
   
   if (IsInFullOccupancyCyclesTree == false && IsInAvailableCyclesTree == false) {
     return true;
@@ -1927,8 +2152,6 @@ DynamicAnalysis::FindNextNonEmptyLevel(unsigned ExecutionResource, uint64_t Leve
         }
       }
       
-      
-      
       dbgs() << "NodeFull->key " << LastNodeVisited->key<<"\n";
       // Current = LastNodeVisited->key;
     }
@@ -2072,7 +2295,9 @@ DynamicAnalysis::FindNextNonEmptyLevel(unsigned ExecutionResource, uint64_t Leve
         dbgs() << "Node->key = Closest\n";
         // MODIFICATION with respect to the normal search in the tree.
         if( Node->BitVector[ExecutionResource]==1){
+#ifdef DEBUG_GENERIC
           DEBUG(dbgs() << "Is in full for this resource\n");
+#endif
           Closest = Node->key;
           LastNodeVisited = Node;
           IsInFullOccupancyCyclesTree = false;
@@ -2080,7 +2305,9 @@ DynamicAnalysis::FindNextNonEmptyLevel(unsigned ExecutionResource, uint64_t Leve
           break;
           
         }else{
+#ifdef DEBUG_GENERIC
           DEBUG(dbgs() << "Is in full, but not for this resource, so keep searching\n");
+#endif
           FullOccupancyCyclesTree[TreeChunk] = splay(Node->key,FullOccupancyCyclesTree[TreeChunk]);
           Node =  FullOccupancyCyclesTree[TreeChunk];
           Original = Node->key+1;
@@ -2090,7 +2317,9 @@ DynamicAnalysis::FindNextNonEmptyLevel(unsigned ExecutionResource, uint64_t Leve
         
       }
     }
+#ifdef DEBUG_GENERIC
     DEBUG(dbgs() << "NodeFull->key " << LastNodeVisited->key<<"\n");
+#endif
     // Current = LastNodeVisited->key;
     
     
@@ -2101,7 +2330,6 @@ DynamicAnalysis::FindNextNonEmptyLevel(unsigned ExecutionResource, uint64_t Leve
   }
   
   
-  dbgs() << "Next non empty level " << min(NextNonEmptyLevelAvailableCyclesTree, NextNonEmptyLevelFullOccupancyCyclesTree) << "\n";
   if (NextNonEmptyLevelAvailableCyclesTree == Level) {
     return NextNonEmptyLevelFullOccupancyCyclesTree;
   }else{
@@ -2126,6 +2354,8 @@ uint64_t
 DynamicAnalysis::CalculateSpan(int ResourceType){
   
   uint64_t Span = 0;
+  bool IsInAvailableCyclesTree = false;
+  bool IsInFullOccupancyCyclesTree = false;
   
   //If there are instructions of this type....
   if (InstructionsCountExtended[ResourceType]>0) {
@@ -2148,8 +2378,10 @@ DynamicAnalysis::CalculateSpan(int ResourceType){
     //  for(unsigned i=First+IssueCycleGranularity; i <= LastCycle; i+=IssueCycleGranularity){
     for(unsigned i=First+1; i <= LastCycle; i+=1){
       //Check whether there is instruction scheduled in this cycle!
-      if (IsEmptyLevel( ResourceType,i)==false) {
-        if ( i <= DominantLevel+Latency-1){
+      IsInAvailableCyclesTree = false;
+      IsInFullOccupancyCyclesTree = false;
+      if (IsEmptyLevel( ResourceType,i, IsInAvailableCyclesTree, IsInFullOccupancyCyclesTree)==false) {
+        if ( DominantLevel+Latency!= 0 && i <= DominantLevel+Latency-1){
           if (i+Latency > DominantLevel+Latency && Latency!=0) {
 #ifdef DEBUG_SPAN_CALCULATION
             DEBUG(dbgs() << "Increasing Span by the difference " << ((i+Latency)-max((DominantLevel+Latency),(uint64_t)1)) << "\n");
@@ -2179,10 +2411,10 @@ DynamicAnalysis::GetLastIssueCycle(unsigned ExecutionResource, bool WithPrefetch
   bool isPrefetchType = false;
   unsigned  IssueCycleGranularity = IssueCycleGranularities[ExecutionResource];
   uint64_t LastCycle = InstructionsLastIssueCycle[ExecutionResource];
-  
+#ifdef DEBUG_GENERIC
   DEBUG(dbgs() << "Last cycle in InstructionLastIssueCycle for resource " <<
         ResourcesNames[ExecutionResource]<< ": " << LastCycle << "\n");
-  
+#endif
   if(ExecutionResource <= nExecutionUnits){
     
     AvailableCyclesTree[ExecutionResource] = splay(LastCycle,AvailableCyclesTree[ExecutionResource]);
@@ -2194,15 +2426,23 @@ DynamicAnalysis::GetLastIssueCycle(unsigned ExecutionResource, bool WithPrefetch
     if (isPrefetchType) {
       if (( NodeAvailable != NULL && NodeAvailable->key== LastCycle && NodeAvailable->occupancyPrefetch == 0 ) ||
           ( NodeFull != NULL && NodeFull->key== LastCycle && NodeFull->BitVector[ExecutionResource]==0 ) ) {
+#ifdef DEBUG_GENERIC
         DEBUG(dbgs() << "Reducing last cycle " << LastCycle << " by issuegranularity\n");
+#endif
         LastCycle = LastCycle-/*1*/IssueCycleGranularity;
+#ifdef DEBUG_GENERIC
         DEBUG(dbgs() << "LastCycle " << LastCycle << "\n");
+#endif
       }
     }else{
       if ( NodeAvailable != NULL && NodeAvailable->key== LastCycle && NodeAvailable->issueOccupancy == 0 ) {
+#ifdef DEBUG_GENERIC
         DEBUG(dbgs() << "Reducing last cycle " << LastCycle << " by issuegranularity\n");
+#endif
         LastCycle = LastCycle-/*1*/IssueCycleGranularity;
+#ifdef DEBUG_GENERIC
         DEBUG(dbgs() << "LastCycle " << LastCycle << "\n");
+#endif
       }
     }
   }
@@ -2210,7 +2450,128 @@ DynamicAnalysis::GetLastIssueCycle(unsigned ExecutionResource, bool WithPrefetch
 }
 
 
+#ifdef SOURCE_CODE_ANALYSIS
+void
+DynamicAnalysis::CollectSourceCodeLineStatistics(uint64_t ResourceType, uint64_t Cycle,  uint64_t MaxLatencyLevel, uint64_t SpanIncrease, bool IsInFullOccupancyCyclesTree, bool IsInAvailableCyclesTree){
+  
+  uint64_t Line = 0;
+  typedef unordered_map<uint64_t,set<uint64_t> >::iterator it_type;
+  unsigned TreeChunk = GetTreeChunk(Cycle);
+  
+  if (IsInFullOccupancyCyclesTree == true && FullOccupancyCyclesTree[TreeChunk]!= NULL && FullOccupancyCyclesTree[TreeChunk]->key == Cycle) {
+    // For every line in the source code. But set does not provide access []
+    // operator,so have to iterate
+    //for (int k = 0; k < FullOccupancyCyclesTree[0]->SourceCodeLines.size(); k++) {
+    for (std::set<uint64_t>::iterator it=FullOccupancyCyclesTree[TreeChunk]->SourceCodeLines.begin(); it!=FullOccupancyCyclesTree[TreeChunk]->SourceCodeLines.end(); ++it){
+      
+      Line = *it;
+#ifdef DEBUG_SOURCE_CODE_LINE_ANALYSIS
+      DEBUG(dbgs() << "Line " << Line << " contributes issuing or stall to this cycle ("<< Cycle <<")\n");
+#endif
+      // SourceCodeLineInfo[Line] contains a set of the cycles associated to this line.
+      // We want all the cycles associated to a line for the fraction of the total
+      // span this line contributes to
+      SourceCodeLineInfo[Line].insert(Cycle);
+      
+      // Iterate thtough the operations of this line
+      for (std::set<uint64_t>::iterator it=SourceCodeLineOperations[Line].begin(); it!=SourceCodeLineOperations[Line].end(); ++it){
+        if (ResourceType == *it) {
+          // SourceCodeLineInfoBreakdown[Line] is a vector.
+          if (SourceCodeLineInfoBreakdown[Line].size()==0) {
+            for (int z = 0; z <= 21 ; z++) {
+              SourceCodeLineInfoBreakdown[Line].push_back(0);
+            }
+          }
+#ifdef DEBUG_SOURCE_CODE_LINE_ANALYSIS
+          DEBUG(dbgs() << "Increasing  SourceCodeLineInfoBreakdown at position " << GetPositionSourceCodeLineInfoVector(ResourceType) << "\n");
+#endif
+          SourceCodeLineInfoBreakdown[Line][GetPositionSourceCodeLineInfoVector(ResourceType)]++;
+          // For latency cycles.
+          for (unsigned k = Cycle+1; k < Cycle+MaxLatencyLevel; k++) {
+            SourceCodeLineInfo[Line].insert(k);
+          }
+          if (SpanIncrease != MaxLatencyLevel && SourceCodeLineInfoBreakdown[Line][GetPositionSourceCodeLineInfoVector(ResourceType)+1]!= 0) {
+            SourceCodeLineInfoBreakdown[Line][GetPositionSourceCodeLineInfoVector(ResourceType)+1]--;
+#ifdef DEBUG_SOURCE_CODE_LINE_ANALYSIS
+            DEBUG(dbgs()<< "Decreasing one cycle latency\n");
+#endif
+          }
+          
+          for (unsigned k = 0; k < SpanIncrease; k++) {
+#ifdef DEBUG_SOURCE_CODE_LINE_ANALYSIS
+            DEBUG(dbgs() << "Increasing  SourceCodeLineInfoBreakdown at position " << GetPositionSourceCodeLineInfoVector(ResourceType)+1 << "\n");
+#endif
+            SourceCodeLineInfoBreakdown[Line][GetPositionSourceCodeLineInfoVector(ResourceType)+1]++;
+          }
+        }
+      }
+      
+      
+      
+      
+      
+    }
+  }
+  
+  if (IsInAvailableCyclesTree == true && AvailableCyclesTree[ResourceType]!= NULL && AvailableCyclesTree[ResourceType]->key == Cycle ) {
+    
+    // For every line in the source code
+    //  for (int k = 0; k < AvailableCyclesTree[ResourcesVector[0]]->SourceCodeLines.size(); k++) {
+    for (std::set<uint64_t>::iterator it=AvailableCyclesTree[ResourceType]->SourceCodeLines.begin(); it!=AvailableCyclesTree[ResourceType]->SourceCodeLines.end(); ++it){
+      
+      // Line = AvailableCyclesTree[ResourcesVector[0]]->SourceCodeLines[k];
+      Line = *it;
+#ifdef DEBUG_SOURCE_CODE_LINE_ANALYSIS
+      DEBUG(dbgs() << "Line " << Line << " contributes issuing or stall to this cycle ("<< Cycle <<")\n");
+#endif
+      // SourceCodeLineInfo[Line] contains a set of the cycles associated to this line.
+      // We want all the cycles associated to a line for the fraction of the total
+      // span this line contributes to
+      SourceCodeLineInfo[Line].insert(Cycle);
+      
+      // Iterate thtough the operations of this line
+      for (std::set<uint64_t>::iterator it=SourceCodeLineOperations[Line].begin(); it!=SourceCodeLineOperations[Line].end(); ++it){
+        
+        if (ResourceType == *it) {
+          // SourceCodeLineInfoBreakdown[Line] is a vector.
+          if (SourceCodeLineInfoBreakdown[Line].size()==0) {
+            for (int z = 0; z <= 21 ; z++) {
+              SourceCodeLineInfoBreakdown[Line].push_back(0);
+            }
+          }
+#ifdef DEBUG_SOURCE_CODE_LINE_ANALYSIS
+          DEBUG(dbgs() << "Increasing  SourceCodeLineInfoBreakdown at position " << GetPositionSourceCodeLineInfoVector(ResourceType) << "\n");
+#endif
+          SourceCodeLineInfoBreakdown[Line][GetPositionSourceCodeLineInfoVector(ResourceType)]++;
+          
+          if (SpanIncrease != MaxLatencyLevel && SourceCodeLineInfoBreakdown[Line][GetPositionSourceCodeLineInfoVector(ResourceType)+1]!= 0) {
+            SourceCodeLineInfoBreakdown[Line][GetPositionSourceCodeLineInfoVector(ResourceType)+1]--;
+#ifdef DEBUG_SOURCE_CODE_LINE_ANALYSIS
+            DEBUG(dbgs()<< "Decreasing one cycle latency\n");
+#endif
+          }
+          
+          // For latency cycles.
+          for (unsigned k = Cycle+1; k < Cycle+MaxLatencyLevel; k++) {
+            SourceCodeLineInfo[Line].insert(k);
+          }
+          
+          for (unsigned k = 0; k < SpanIncrease; k++) {
+#ifdef DEBUG_SOURCE_CODE_LINE_ANALYSIS
+            DEBUG(dbgs() << "Increasing  SourceCodeLineInfoBreakdown at position " << GetPositionSourceCodeLineInfoVector(ResourceType)+1 << "\n");
+#endif
+            SourceCodeLineInfoBreakdown[Line][GetPositionSourceCodeLineInfoVector(ResourceType)+1]++;
+          }
+        }
+      }
+      
+    }
+  }
+  
+}
 
+
+#endif
 unsigned
 DynamicAnalysis::CalculateGroupSpan(vector<int> & ResourcesVector, bool WithPrefetch, bool ForceUnitLatency){
   
@@ -2225,6 +2586,9 @@ DynamicAnalysis::CalculateGroupSpan(vector<int> & ResourcesVector, bool WithPref
   unsigned MaxLatencyLevel = 0;
   unsigned ResourceType = 0;
   unsigned AccessWidth = 0;
+  bool IsInAvailableCyclesTree = false;
+  bool IsInFullOccupancyCyclesTree = false;
+  unsigned SpanIncrease = 0;
   
   // vector<uint64_t> NextNonEmptyLevelVector;
   // uint64_t NextNonEmptyLevel;
@@ -2242,7 +2606,9 @@ DynamicAnalysis::CalculateGroupSpan(vector<int> & ResourcesVector, bool WithPref
     ResourceType = ResourcesVector[j];
     
     if (InstructionsCountExtended[ResourceType]>0) {
+#ifdef DEBUG_SPAN_CALCULATION
       DEBUG(dbgs() << "There are instructions of type "<< ResourceType<<"\n");
+#endif
       AccessWidth = AccessWidths[ResourceType];
       
       if (EmptyLevel == true) { // This will be only executed the first time of a non-empty level
@@ -2280,16 +2646,42 @@ DynamicAnalysis::CalculateGroupSpan(vector<int> & ResourcesVector, bool WithPref
 #ifdef DEBUG_SPAN_CALCULATION
       DEBUG(dbgs() << "Calling GetLastIssueCycle with args "<< ResourceType << "  " << WithPrefetch<<"\n");
       DEBUG(dbgs() << "Last cycle returned from ResourceLastCycle "<< ResourceLastCycle<<"\n");
+      DEBUG(dbgs() << "First non-empty level  " << First << "\n");
+      
 #endif
       LastCycle = max(LastCycle, ResourceLastCycle);
+      
+#ifdef SOURCE_CODE_ANALYSIS
+      if(NResources == 1 && ResourceType < nExecutionUnits ){
+        unsigned TreeChunk = GetTreeChunk(First);
+        FullOccupancyCyclesTree[TreeChunk] = splay(First,  FullOccupancyCyclesTree[TreeChunk]);
+        AvailableCyclesTree[ResourceType] = splay(First, AvailableCyclesTree[ResourceType]);
+        CollectSourceCodeLineStatistics(ResourceType, First, MaxLatency, MaxLatency-1, true,true);
+      }
+      
+      
+      if(NResources == 1 && ResourceType >= RS_STALL){
+        unsigned TreeChunk = GetTreeChunk(First);
+        FullOccupancyCyclesTree[TreeChunk] = splay(First,  FullOccupancyCyclesTree[TreeChunk]);
+        CollectSourceCodeLineStatistics(ResourceType, First, MaxLatency, MaxLatency-1, true,false);
+      }
+      
+      
+#endif
+      
     }
   }
-  #ifdef DEBUG_SPAN_CALCULATION
+  
+#ifdef DEBUG_SPAN_CALCULATION
   DEBUG(dbgs() << "First non-empty level  " << First << "\n");
   DEBUG(dbgs() << "MaxLatency  " << MaxLatency << "\n");
   DEBUG(dbgs() << "LastCycle  " << LastCycle << "\n");
 #endif
   unsigned DominantLevel = First;
+  
+  
+  
+  
   
   if (EmptyLevel == false) {
     Span+= MaxLatency;
@@ -2306,15 +2698,16 @@ DynamicAnalysis::CalculateGroupSpan(vector<int> & ResourcesVector, bool WithPref
         ResourceType = ResourcesVector[j];
         
         if (i <= LastIssueCycleVector[ResourceType]/*GetLastIssueCycle(ResourceType, WithPrefetch)*/ ) {
-          if (IsEmptyLevel(ResourceType, i, WithPrefetch) == false) {
-            // dbgs() << "Level non empty\n";
+          IsInAvailableCyclesTree = false;
+          IsInFullOccupancyCyclesTree = false;
+          if (IsEmptyLevel(ResourceType, i, IsInAvailableCyclesTree, IsInFullOccupancyCyclesTree, WithPrefetch) == false) {
             IsGap = false;
             // MaxLatencyLevel = max(MaxLatencyLevel, GetInstructionLatency(ResourcesVector[j]));
             if (ForceUnitLatency ==true) {
               MaxLatencyLevel = 1;
             }else{
               AccessWidth =AccessWidths[ResourceType];
-             
+              
               if (ExecutionUnitsThroughput[ResourceType] == INF) {
                 MaxLatencyLevel = max(MaxLatencyLevel, ExecutionUnitsLatency[ResourceType]);
                 
@@ -2323,7 +2716,7 @@ DynamicAnalysis::CalculateGroupSpan(vector<int> & ResourcesVector, bool WithPref
                 MaxLatencyLevel = max(MaxLatencyLevel, max(ExecutionUnitsLatency[ResourceType],(unsigned)ceil(AccessWidth/ExecutionUnitsThroughput[ResourceType])));
               }
             }
-                      }
+          }
         }
       }
       
@@ -2333,40 +2726,56 @@ DynamicAnalysis::CalculateGroupSpan(vector<int> & ResourcesVector, bool WithPref
       
       //That is, only if there are instructions scheduled in this cycle
       if(MaxLatencyLevel !=0){
-        if ( i <= DominantLevel+MaxLatency-1){
+        
+        // Add the first condition because if Latency=0 is allowed, it can happen
+        // that DominantLevel+MaxLatency-1 is a negative number, so the loop
+        // is entered incorrectly.
+        if ( DominantLevel+MaxLatency!= 0 &&  i <= DominantLevel+MaxLatency-1){
           
           if (i+MaxLatencyLevel > DominantLevel+MaxLatency && MaxLatencyLevel!=0) {
+            
+            SpanIncrease = ((i+MaxLatencyLevel)-max((DominantLevel+MaxLatency),(unsigned)1)) ;
+            
+            
+            
 #ifdef DEBUG_SPAN_CALCULATION
-            DEBUG(dbgs() << "Increasing Span by the difference " << ((i+MaxLatencyLevel)-max((DominantLevel+MaxLatency),(unsigned)1)) << "\n");
+            DEBUG(dbgs() << "Increasing Span by the difference " << SpanIncrease<< "\n");
 #endif
             
-            Span+=((i+MaxLatencyLevel)-max((DominantLevel+MaxLatency),(unsigned)1));
+            Span+=SpanIncrease;
             DominantLevel = i;
             MaxLatency = MaxLatencyLevel;
           }
         }else{
+          
 #ifdef DEBUG_SPAN_CALCULATION
           DEBUG(dbgs() << "Increasing Span by " << MaxLatencyLevel << "\n");
 #endif
-          
+          SpanIncrease = MaxLatencyLevel-1;
           Span+=MaxLatencyLevel;
           DominantLevel = i;
           MaxLatency = MaxLatencyLevel;
         }
+#ifdef SOURCE_CODE_ANALYSIS
+        if(NResources == 1  && (ResourceType < nExecutionUnits || ResourceType >= RS_STALL)){
+          CollectSourceCodeLineStatistics(ResourceType, i, MaxLatencyLevel, SpanIncrease, IsInFullOccupancyCyclesTree,IsInAvailableCyclesTree);
+        }
+        
+#endif
       }else{
         if ( i > DominantLevel+MaxLatency-1){
           if (NResources==1 && IsGap == false) {
             SpanGaps[ResourceType]++;
+#ifdef DEBUG_SPAN_CALCULATION
             DEBUG(dbgs() << "Increasing span gaps for resource " << ResourcesNames[ResourceType] << "\n");
+#endif
             IsGap = true;
           }
         }
       }
       
-        }
+    }
   }
-  
-  DEBUG(dbgs() << "CalculateGroupSpan returns Span =  " << Span<< "\n");
   
   return Span;
 }
@@ -2387,6 +2796,9 @@ DynamicAnalysis::CalculateIssueSpan(vector<int> & ResourcesVector){
   unsigned ResourceType = 0;
   unsigned AccessWidth = 0;
   unsigned TmpLatency = 0;
+  bool IsInAvailableCyclesTree = false;
+  bool IsInFullOccupancyCyclesTree = false;
+  
   
 #ifdef DEBUG_SPAN_CALCULATION
   DEBUG(dbgs() << "Resources that contribute to Span:\n");
@@ -2407,10 +2819,10 @@ DynamicAnalysis::CalculateIssueSpan(vector<int> & ResourcesVector){
         TmpLatency = 1;
       else
         TmpLatency = ceil(AccessWidth/ExecutionUnitsThroughput[ResourceType]);
-      
+#ifdef DEBUG_SPAN_CALCULATION
       DEBUG(dbgs() << "AccessWidth "<< AccessWidth<<"\n");
       DEBUG(dbgs() << "There are instructions of type "<< ResourceType<<"\n");
-      
+#endif
       if (EmptyLevel == true) { // This will be only executed the first time of a non-empty level
         EmptyLevel = false;
         First = FirstNonEmptyLevel[ResourceType];
@@ -2428,11 +2840,11 @@ DynamicAnalysis::CalculateIssueSpan(vector<int> & ResourcesVector){
           }
         }
       }
-      
+#ifdef DEBUG_SPAN_CALCULATION
       DEBUG(dbgs() << "ResourceType "<< ResourceType<<"\n");
       DEBUG(dbgs() << "LastIssueCycleVector size "<< LastIssueCycleVector.size()<<"\n");
       DEBUG(dbgs() << "LastIssueCycleVector[ResourceType] "<< LastIssueCycleVector[ResourceType]<<"\n");
-      
+#endif
       ResourceLastCycle = LastIssueCycleVector[ResourceType];
       
 #ifdef DEBUG_SPAN_CALCULATION
@@ -2461,8 +2873,9 @@ DynamicAnalysis::CalculateIssueSpan(vector<int> & ResourcesVector){
         ResourceType = ResourcesVector[j];
         
         if (i <= LastIssueCycleVector[ResourceType]/*GetLastIssueCycle(ResourceType, 0)*/) {
-          if (IsEmptyLevel(ResourceType, i, false) == false) {
-            //   dbgs() << "Level "<< i<<" got full2\n";
+          IsInAvailableCyclesTree = false;
+          IsInFullOccupancyCyclesTree = false;
+          if (IsEmptyLevel(ResourceType, i, IsInAvailableCyclesTree, IsInFullOccupancyCyclesTree, false) == false) {
             AccessWidth = AccessWidths[ResourceType];
             if (ExecutionUnitsThroughput[ResourceType]==INF)
               TmpLatency = 1;
@@ -2480,9 +2893,8 @@ DynamicAnalysis::CalculateIssueSpan(vector<int> & ResourcesVector){
       
       //That is, only if there are instructions scheduled in this cycle
       if(MaxLatencyLevel !=0){
-        //   dbgs() << "MaxLatencyLevel !=0\n";
         if ( i <= DominantLevel+MaxLatency-1){
-          //      dbgs() << "This should never be executed. i = "<<i<<", DominantLevel = "<< DominantLevel<<", MaxLatency "<<MaxLatency<<", DominantLevel+MaxLatency-1 = "<<DominantLevel+MaxLatency-1<<"\n";
+          
           
           if (i+MaxLatencyLevel > DominantLevel+MaxLatency && MaxLatencyLevel!=0) {
 #ifdef DEBUG_SPAN_CALCULATION
@@ -2495,10 +2907,6 @@ DynamicAnalysis::CalculateIssueSpan(vector<int> & ResourcesVector){
           }
         }else{
           
-          if (ResourceType == L2_LOAD_CHANNEL) {
-            //    dbgs() << "Vicky. i = "<<i<<", DominantLevel = "<< DominantLevel<<", MaxLatency "<<MaxLatency<<", DominantLevel+MaxLatency-1 = "<<DominantLevel+MaxLatency-1<<"\n";
-            //    dbgs() << "Increasing Span by " << MaxLatencyLevel << "\n";
-          }
 #ifdef DEBUG_SPAN_CALCULATION
           DEBUG(dbgs() << "Increasing Span by " << MaxLatencyLevel << "\n");
 #endif
@@ -2510,8 +2918,9 @@ DynamicAnalysis::CalculateIssueSpan(vector<int> & ResourcesVector){
       }
     }
   }
-  
+#ifdef DEBUG_SPAN_CALCULATION
   DEBUG(dbgs() << "Span = " << Span << "\n");
+#endif
   return Span;
 }
 
@@ -2545,25 +2954,35 @@ DynamicAnalysis::RemoveFromLoadBuffer(uint64_t Cycle){
 void
 DynamicAnalysis::RemoveFromLoadBufferTree(uint64_t Cycle){
   
-  
-  if (LoadBufferCompletionCyclesTree != NULL) {
+  bool CycleFound = true;
+  while (CycleFound == true) {
     
-    LoadBufferCompletionCyclesTree = splay(Cycle, LoadBufferCompletionCyclesTree);
     
-    if (LoadBufferCompletionCyclesTree->key == Cycle) { // If Cycle found
-      LoadBufferCompletionCyclesTree->left = NULL;
-      LoadBufferCompletionCyclesTree = delete_node(Cycle,LoadBufferCompletionCyclesTree);
-      // If we remove the minimum, the resulting tree has as node the
-      // successor of the minimum, which is the next minimum
-      if (Cycle == MinLoadBuffer && LoadBufferCompletionCyclesTree != NULL) {
-        MinLoadBuffer = LoadBufferCompletionCyclesTree->key;
+    if (LoadBufferCompletionCyclesTree != NULL) {
+      
+      LoadBufferCompletionCyclesTree = splay(Cycle, LoadBufferCompletionCyclesTree);
+      
+      
+      if (LoadBufferCompletionCyclesTree->key == Cycle) { // If Cycle found
+        LoadBufferCompletionCyclesTree->left = NULL;
+        LoadBufferCompletionCyclesTree = delete_node(Cycle,LoadBufferCompletionCyclesTree);
+        // If we remove the minimum, the resulting tree has as node the
+        // successor of the minimum, which is the next minimum -> This is not
+        // true after we have splayed and the minimum is in the root.
+        if (Cycle == MinLoadBuffer && LoadBufferCompletionCyclesTree != NULL) {
+          MinLoadBuffer = min(LoadBufferCompletionCyclesTree);
+          // MinLoadBuffer = LoadBufferCompletionCyclesTree->key;
+        }
+      }else{
+        CycleFound = false;
       }
+      
+      
+    }else{
+      CycleFound = false;
     }
     
-    
   }
-  
-  
   
 }
 
@@ -2642,7 +3061,6 @@ void DynamicAnalysis::inOrder(uint64_t i, ComplexTree<uint64_t> * n) {
     }
     
     
-    //dbgs() << "Inserting into LB node with issue cycle " << n->IssueCycle << " and key " << n->key << "\n";
     DEBUG(dbgs() << "Inserting into LB node with issue cycle " << n->IssueCycle << " and key " << n->key << "\n");
     LoadBufferCompletionCyclesTree= insert_node(n->key , LoadBufferCompletionCyclesTree);
     PointersToRemove.push_back(n);
@@ -3204,6 +3622,45 @@ DynamicAnalysis::PrintLoadBuffer(){
   DEBUG(dbgs() << "\n");
 }
 
+void
+DynamicAnalysis::PrintLoadBufferTreeRecursive(SimpleTree<uint64_t> * p){
+  
+  if(p != NULL)
+  {
+    if(p->left) PrintLoadBufferTreeRecursive(p->left);
+    if(p->right) PrintLoadBufferTreeRecursive(p->right);
+    DEBUG(dbgs() <<" "<<p->key);
+  }
+  else return;
+}
+
+
+void
+DynamicAnalysis::PrintDispatchToLoadBufferTreeRecursive(ComplexTree<uint64_t> * p, bool key){
+  if(p != NULL)
+  {
+    if(p->left) PrintDispatchToLoadBufferTreeRecursive(p->left, key);
+    if(p->right) PrintDispatchToLoadBufferTreeRecursive(p->right, key);
+    if (key) {
+      DEBUG(dbgs() <<" "<<p->key);
+    }else
+      DEBUG(dbgs() <<" "<<p->IssueCycle);
+    
+  }
+  else return;
+  
+}
+
+
+
+void
+DynamicAnalysis::PrintLoadBufferTree(){
+  
+  DEBUG(dbgs() << "Load Buffer Tree:\n");
+  PrintLoadBufferTreeRecursive(LoadBufferCompletionCyclesTree);
+  DEBUG(dbgs() << "\n");
+}
+
 
 
 void
@@ -3246,6 +3703,17 @@ DynamicAnalysis::PrintDispatchToLoadBuffer(){
 }
 
 
+void
+DynamicAnalysis::PrintDispatchToLoadBufferTree(){
+  
+  DEBUG(dbgs() << "Dispatch to Load Buffer Issue Cycles:\n");
+  PrintDispatchToLoadBufferTreeRecursive(DispatchToLoadBufferQueueTree, false);
+  DEBUG(dbgs() << "\n");
+  DEBUG(dbgs() << "Dispatch to Load Buffer Completion Cycles:\n");
+  PrintDispatchToLoadBufferTreeRecursive(DispatchToLoadBufferQueueTree, true);
+  DEBUG(dbgs() << "\n");
+}
+
 
 void
 DynamicAnalysis::PrintDispatchToStoreBuffer(){
@@ -3284,52 +3752,12 @@ DynamicAnalysis::PrintDispatchToLineFillBuffer(){
 
 
 void
-DynamicAnalysis::IncreaseInstructionFetchCycle(){
+DynamicAnalysis::IncreaseInstructionFetchCycle(bool EmptyBuffers){
   
   bool OOOBufferFull = false;
   unsigned TreeChunk = 0;
+  uint64_t OriginalInstructionFetchCycle = InstructionFetchCycle;
   
-  if (DispatchToLineFillBufferQueue.empty() == false) {
-    if (InstructionsCountExtended[LFB_STALL]==0)
-      FirstIssue[LFB_STALL] = true;
-    if (FirstIssue[LFB_STALL]==true) {
-      FirstNonEmptyLevel[LFB_STALL] = InstructionFetchCycle;
-      FirstIssue[LFB_STALL] = false;
-    }
-    
-    //FirstNonEmptyLevel[LFB_STALL] = (FirstNonEmptyLevel[LFB_STALL]==0)?InstructionFetchCycle:FirstNonEmptyLevel[LFB_STALL];
-    InstructionsLastIssueCycle[LFB_STALL] =InstructionFetchCycle;
-    FullOccupancyCyclesTree[InstructionFetchCycle/SplitTreeRange] = insert_node(InstructionFetchCycle, LFB_STALL, FullOccupancyCyclesTree[InstructionFetchCycle/SplitTreeRange]);
-    InstructionsCountExtended[LFB_STALL]++;
-  }
-  
-  if (node_size(DispatchToLoadBufferQueueTree) != 0) {
-    //if (DispatchToLoadBufferQueue.empty() == false) {
-    if (InstructionsCountExtended[LB_STALL]==0)
-      FirstIssue[LB_STALL] = true;
-    if (FirstIssue[LB_STALL]==true) {
-      FirstNonEmptyLevel[LB_STALL] = InstructionFetchCycle;
-      FirstIssue[LB_STALL] = false;
-    }
-    //FirstNonEmptyLevel[LB_STALL] = (FirstNonEmptyLevel[LB_STALL]==0)?InstructionFetchCycle:FirstNonEmptyLevel[LB_STALL];
-    InstructionsLastIssueCycle[LB_STALL] =InstructionFetchCycle;
-    FullOccupancyCyclesTree[InstructionFetchCycle/SplitTreeRange] = insert_node(InstructionFetchCycle, LB_STALL, FullOccupancyCyclesTree[InstructionFetchCycle/SplitTreeRange]);
-    InstructionsCountExtended[LB_STALL]++;
-  }
-  
-  if (DispatchToStoreBufferQueue.empty() == false) {
-    if (InstructionsCountExtended[SB_STALL]==0)
-      FirstIssue[SB_STALL] = true;
-    if (FirstIssue[SB_STALL]==true) {
-      FirstNonEmptyLevel[SB_STALL] = InstructionFetchCycle;
-      FirstIssue[SB_STALL] = false;
-    }
-    
-    //FirstNonEmptyLevel[SB_STALL] = (FirstNonEmptyLevel[SB_STALL]==0)?InstructionFetchCycle:FirstNonEmptyLevel[SB_STALL];
-    InstructionsLastIssueCycle[SB_STALL] =InstructionFetchCycle;
-    FullOccupancyCyclesTree[InstructionFetchCycle/SplitTreeRange] = insert_node(InstructionFetchCycle, SB_STALL,FullOccupancyCyclesTree[InstructionFetchCycle/SplitTreeRange]);
-    InstructionsCountExtended[SB_STALL]++;
-  }
   
   DEBUG(dbgs() << "_____________________ InstructionFetchCycle "<<InstructionFetchCycle<<"_____________________\n");
   
@@ -3338,10 +3766,12 @@ DynamicAnalysis::IncreaseInstructionFetchCycle(){
   PrintReservationStation();
   PrintReorderBuffer();
   PrintStoreBuffer();
-  PrintLoadBuffer();
+  PrintLoadBufferTree();
+  // PrintLoadBuffer();
   PrintLineFillBuffer();
   PrintDispatchToStoreBuffer();
-  PrintDispatchToLoadBuffer();
+  //  PrintDispatchToLoadBuffer();
+  PrintDispatchToLoadBufferTree();
   PrintDispatchToLineFillBuffer();
 #endif
 #endif
@@ -3379,17 +3809,19 @@ DynamicAnalysis::IncreaseInstructionFetchCycle(){
   PrintReservationStation();
   PrintReorderBuffer();
   PrintStoreBuffer();
-  PrintLoadBuffer();
+  PrintLoadBufferTree();
+  //PrintLoadBuffer();
   PrintLineFillBuffer();
   PrintDispatchToStoreBuffer();
-  PrintDispatchToLoadBuffer();
+  // PrintDispatchToLoadBuffer();
+  PrintDispatchToLoadBufferTree();
   PrintDispatchToLineFillBuffer();
 #endif
 #endif
   // If Reservation station is full
   if (ReservationStationIssueCycles.size() == ReservationStationSize && ReservationStationSize > 0) {
     
-    // Advance InstructionFetchCyle untill min issue cycle
+    // Advance InstructionFetchCyle until min issue cycle
     OOOBufferFull = true;
     uint64_t CurrentInstructionFetchCycle = InstructionFetchCycle;
     InstructionFetchCycle = GetMinIssueCycleReservationStation();
@@ -3399,14 +3831,13 @@ DynamicAnalysis::IncreaseInstructionFetchCycle(){
     
     
     for (uint64_t i = CurrentInstructionFetchCycle+1; i< InstructionFetchCycle; i++) {
-      TreeChunk =i/SplitTreeRange;
-      if (TreeChunk >= (unsigned)FullOccupancyCyclesTree.size()) {
-        for (unsigned j = FullOccupancyCyclesTree.size(); j<= TreeChunk; j++) {
-          DEBUG(dbgs() << "Iserting element in FullOccupancyCyclesTree");
-          FullOccupancyCyclesTree.push_back(NULL);
-        }
-      }
+      TreeChunk = GetTreeChunk(i);
+      
       FullOccupancyCyclesTree[TreeChunk] = insert_node(i, RS_STALL,FullOccupancyCyclesTree[TreeChunk]);
+#ifdef SOURCE_CODE_ANALYSIS
+      
+      FullOccupancyCyclesTree[TreeChunk]->SourceCodeLines.insert(SourceCodeLine);
+#endif
       InstructionsCountExtended[RS_STALL]++;
       InstructionsLastIssueCycle[RS_STALL] =i;
     }
@@ -3427,15 +3858,12 @@ DynamicAnalysis::IncreaseInstructionFetchCycle(){
     
     for (uint64_t i = CurrentInstructionFetchCycle+1; i< InstructionFetchCycle; i++) {
       // Get the node, if any, corresponding to this issue cycle.
-      TreeChunk =i/SplitTreeRange;
-      if (TreeChunk >= (unsigned)FullOccupancyCyclesTree.size()) {
-        for (unsigned j = FullOccupancyCyclesTree.size(); j<= TreeChunk; j++) {
-          DEBUG(dbgs() << "Iserting element in FullOccupancyCyclesTree");
-          FullOccupancyCyclesTree.push_back(NULL);
-        }
-      }
+      TreeChunk = GetTreeChunk(i);
       
       FullOccupancyCyclesTree[TreeChunk] = insert_node(i, ROB_STALL, FullOccupancyCyclesTree[TreeChunk] );
+#ifdef SOURCE_CODE_ANALYSIS
+      FullOccupancyCyclesTree[TreeChunk]->SourceCodeLines.insert(SourceCodeLine);
+#endif
       InstructionsCountExtended[ROB_STALL]++;
       InstructionsLastIssueCycle[ROB_STALL] =i;
     }
@@ -3450,10 +3878,12 @@ DynamicAnalysis::IncreaseInstructionFetchCycle(){
     PrintReorderBuffer();
 #ifdef MOO_BUFFERS
     PrintStoreBuffer();
-    PrintLoadBuffer();
+    //    PrintLoadBuffer();
+    PrintLoadBufferTree();
     PrintLineFillBuffer();
     PrintDispatchToStoreBuffer();
-    PrintDispatchToLoadBuffer();
+    //PrintDispatchToLoadBuffer();
+    PrintDispatchToLoadBufferTree();
     PrintDispatchToLineFillBuffer();
 #endif
 #endif
@@ -3482,24 +3912,113 @@ DynamicAnalysis::IncreaseInstructionFetchCycle(){
     PrintReorderBuffer();
 #ifdef MOO_BUFFERS
     PrintStoreBuffer();
-    PrintLoadBuffer();
+    // PrintLoadBuffer();
+    PrintLoadBufferTree();
     PrintLineFillBuffer();
     PrintDispatchToStoreBuffer();
-    PrintDispatchToLoadBuffer();
+    // PrintDispatchToLoadBuffer();
+    PrintDispatchToLoadBufferTree();
     PrintDispatchToLineFillBuffer();
 #endif
 #endif
   }
-  RemainingInstructionsFetch = InstructionFetchBandwidth;
-  if (OOOBufferFull==false && InstructionFetchBandwidth != INF)
-    InstructionFetchCycle++;
   
+  // When we are at this point, either we have removed from RS or ROB the
+  // instructions issued at this cycle, and they left some empty slots
+  // so that the buffers are not full anymore, or we have advanced
+  // InstructionFetchCycle to the cycle at which any of the buffers
+  // gets empty. In this case, we also have to set Remaining instructions
+  // to fetch to Fetchbanwidth, because we have modified fetch cycle
+  // and we start fetching again.
+  if (OOOBufferFull == true) {
+    RemainingInstructionsFetch = InstructionFetchBandwidth;
+  }
+  
+  if (EmptyBuffers == true) {
+    InstructionFetchCycle++;
+  }else{
+    if(RemainingInstructionsFetch == 0 && InstructionFetchBandwidth != INF){
+      InstructionFetchCycle++;
+      RemainingInstructionsFetch = InstructionFetchBandwidth;
+    }
+  }
+  
+  /*
+   RemainingInstructionsFetch = InstructionFetchBandwidth;
+   if (OOOBufferFull==false && InstructionFetchBandwidth != INF)
+   InstructionFetchCycle++;
+   */
   BuffersOccupancy[RS_STALL-RS_STALL] += ReservationStationIssueCycles.size();
   BuffersOccupancy[ROB_STALL-RS_STALL] += ReorderBufferCompletionCycles.size();
   //BuffersOccupancy[LB_STALL-RS_STALL] += LoadBufferCompletionCycles.size();
   BuffersOccupancy[LB_STALL-RS_STALL] += node_size(LoadBufferCompletionCyclesTree);
   BuffersOccupancy[SB_STALL-RS_STALL] += StoreBufferCompletionCycles.size();
   BuffersOccupancy[LFB_STALL-RS_STALL] += LineFillBufferCompletionCycles.size();
+  
+  
+  if (OriginalInstructionFetchCycle != InstructionFetchCycle) {
+    uint64_t PrevInstructionFetchCycle = InstructionFetchCycle - 1;
+    if (DispatchToLineFillBufferQueue.empty() == false) {
+      if (InstructionsCountExtended[LFB_STALL]==0)
+        FirstIssue[LFB_STALL] = true;
+      if (FirstIssue[LFB_STALL]==true) {
+        FirstNonEmptyLevel[LFB_STALL] = PrevInstructionFetchCycle;
+        FirstIssue[LFB_STALL] = false;
+      }
+      
+      //FirstNonEmptyLevel[LFB_STALL] = (FirstNonEmptyLevel[LFB_STALL]==0)?InstructionFetchCycle:FirstNonEmptyLevel[LFB_STALL];
+      InstructionsLastIssueCycle[LFB_STALL] =PrevInstructionFetchCycle;
+      FullOccupancyCyclesTree[PrevInstructionFetchCycle/SplitTreeRange] = insert_node(PrevInstructionFetchCycle, LFB_STALL, FullOccupancyCyclesTree[PrevInstructionFetchCycle/SplitTreeRange]);
+      // We do it when an instruction is inserted. Otherwise, SourceCodeLine has the value
+      // of the last instruction analyzed from the instruction fetch window, which
+      // might not be the instruction that was stalled.
+      
+      /*#ifdef SOURCE_CODE_ANALYSIS
+       FullOccupancyCyclesTree[PrevInstructionFetchCycle/SplitTreeRange]->SourceCodeLines.insert(SourceCodeLine);
+       #endif
+       */
+      InstructionsCountExtended[LFB_STALL]++;
+    }
+    
+    if (node_size(DispatchToLoadBufferQueueTree) != 0) {
+      //if (DispatchToLoadBufferQueue.empty() == false) {
+      if (InstructionsCountExtended[LB_STALL]==0)
+        FirstIssue[LB_STALL] = true;
+      if (FirstIssue[LB_STALL]==true) {
+        FirstNonEmptyLevel[LB_STALL] = PrevInstructionFetchCycle;
+        FirstIssue[LB_STALL] = false;
+      }
+      //FirstNonEmptyLevel[LB_STALL] = (FirstNonEmptyLevel[LB_STALL]==0)?InstructionFetchCycle:FirstNonEmptyLevel[LB_STALL];
+      InstructionsLastIssueCycle[LB_STALL] =PrevInstructionFetchCycle;
+      FullOccupancyCyclesTree[PrevInstructionFetchCycle/SplitTreeRange] = insert_node(PrevInstructionFetchCycle, LB_STALL, FullOccupancyCyclesTree[PrevInstructionFetchCycle/SplitTreeRange]);
+      /*
+       #ifdef SOURCE_CODE_ANALYSIS
+       FullOccupancyCyclesTree[PrevInstructionFetchCycle/SplitTreeRange]->SourceCodeLines.insert(SourceCodeLine);
+       #endif
+       */
+      InstructionsCountExtended[LB_STALL]++;
+    }
+    
+    if (DispatchToStoreBufferQueue.empty() == false) {
+      if (InstructionsCountExtended[SB_STALL]==0)
+        FirstIssue[SB_STALL] = true;
+      if (FirstIssue[SB_STALL]==true) {
+        FirstNonEmptyLevel[SB_STALL] = PrevInstructionFetchCycle;
+        FirstIssue[SB_STALL] = false;
+      }
+      
+      //FirstNonEmptyLevel[SB_STALL] = (FirstNonEmptyLevel[SB_STALL]==0)?InstructionFetchCycle:FirstNonEmptyLevel[SB_STALL];
+      InstructionsLastIssueCycle[SB_STALL] =PrevInstructionFetchCycle;
+#ifdef DEBUG_SOURCE_CODE_ANALYSIS
+      DEBUG(dbgs()<< "Inserting SB_STALL when instruction fetch cycle changes for cycle "<< PrevInstructionFetchCycle<<"\n");
+#endif
+      FullOccupancyCyclesTree[PrevInstructionFetchCycle/SplitTreeRange] = insert_node(PrevInstructionFetchCycle, SB_STALL,FullOccupancyCyclesTree[PrevInstructionFetchCycle/SplitTreeRange]);
+      
+      InstructionsCountExtended[SB_STALL]++;
+    }
+  }
+  
+  
   
   
 }
@@ -3557,6 +4076,8 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
   unsigned ExecutionResource = 0;
   
   TotalInstructions++;
+  vector<uint64_t> emptyVector;
+  
   
   // PREPRATION FOR VECTOR CODE
   
@@ -3612,13 +4133,16 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
           CacheLine = MemoryAddress >> BitsPerCacheLine;
           Info = getCacheLineInfo(CacheLine);
           
-#ifdef DEBUG_MEMORY_TRACES
-          DEBUG(dbgs() << "MemoryAddress " << MemoryAddress << "\n");
-          DEBUG(dbgs() << "CacheLine " << CacheLine << "\n");
-#endif
           
           //Code for reuse calculation
           Distance =  ReuseDistance(Info.LastAccess, TotalInstructions, CacheLine);
+          
+#ifdef DEBUG_MEMORY_TRACES
+          DEBUG(dbgs() << "MemoryAddress " << MemoryAddress << "\n");
+          DEBUG(dbgs() << "CacheLine " << CacheLine << "\n");
+          DEBUG(dbgs() << "Distance " << Distance << "\n");
+#endif
+          
           
           Info.LastAccess = TotalInstructions;
           insertCacheLineLastAccess(CacheLine, Info.LastAccess );
@@ -3639,12 +4163,15 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
           CacheLine = MemoryAddress >> BitsPerCacheLine;
           Info = getCacheLineInfo(CacheLine);
           
+          
+          Distance = ReuseDistance(Info.LastAccess, TotalInstructions, CacheLine);
+          
 #ifdef DEBUG_MEMORY_TRACES
           DEBUG(dbgs() << "MemoryAddress " << MemoryAddress << "\n");
           DEBUG(dbgs() << "CacheLine " << CacheLine << "\n");
+          DEBUG(dbgs() << "Distance " << Distance << "\n");
 #endif
           
-          Distance = ReuseDistance(Info.LastAccess, TotalInstructions, CacheLine);
           
           Info.LastAccess = TotalInstructions;
           insertCacheLineLastAccess(CacheLine, Info.LastAccess );
@@ -3698,12 +4225,23 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
     }
   }else{
     
-    
-    
     //================= Update Fetch Cycle, remove insts from buffers =========//
     // EVERY INSTRUCTION IN THE RESERVATION STATION IS ALSO IN THE REORDER BUFFER
     DEBUG(dbgs()<<  I<< " ("<< &I <<")\n");
     if (InstructionType >= 0) {
+      
+#ifdef SOURCE_CODE_ANALYSIS
+      // Get line number
+      if (MDNode *N = I.getMetadata("dbg")) {  // Here I is an LLVM instruction
+        DILocation Loc(N);                      // DILocation is in DebugInfo.h
+        SourceCodeLine = Loc.getLineNumber();
+      }
+      if (SourceCodeLine == 0) {
+        report_fatal_error("Source code analysis requires the applicaiton to be compiled with -g flag");
+      }
+      
+#endif
+      
       //   if (ReservationStationIssueCycles.size() == (unsigned)ReservationStationSize) {
       if (RemainingInstructionsFetch == 0 || /*RemainingInstructionsFetch == INF||*/
           (ReorderBufferCompletionCycles.size() == (unsigned)ReorderBufferSize && ReorderBufferSize != 0)
@@ -3789,13 +4327,9 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
           insertInstructionValueIssueCycle(*i, InstructionIssueCycle+1/*???*/);
         }
 #else
-        //for (User *U : I.users()) {
-        for(Value::use_iterator i = I.use_begin(), ie = I.use_end(); i!=ie; ++i){
-            User *U = *i;
-          // if (Instruction *i = dyn_cast<Instruction>(U)) {
+        for (User *U : I.users()) {
           insertInstructionValueIssueCycle(U, InstructionIssueCycle+1/*???*/);
           
-          //}
         }
 #endif
       }
@@ -3808,10 +4342,7 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
         DEBUG(dbgs() << "Executing PHI Node. Iterate over it uses.\n");
 #endif
         // Iterate through the uses of the PHI node
-        //for (User *U : I.users()) {
-        for(Value::use_iterator i = I.use_begin(), ie = I.use_end(); i!=ie; ++i){
-            User *U = *i;
-          //        if (Instruction *i = dyn_cast<Instruction>(U)) {
+        for (User *U : I.users()) {
 #ifdef DEBUG_PHI_NODE
           DEBUG(dbgs() << "Use of the PHI node " << U << "\n");
 #endif
@@ -3821,8 +4352,7 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
             insertInstructionValueIssueCycle(U, InstructionIssueCycle);
           }
           
-          // insertInstructionValueIssueCycle(*i, InstructionIssueCycle);
-          //}
+          
         }
         
 #endif
@@ -3877,6 +4407,29 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
           // Get the new instruction type depending on the reuse distance
           //ExtendedInstructionType = GetMemoryInstructionType(Distance, MemoryAddress);
           ExtendedInstructionType = GetExtendedInstructionType(Instruction::Load, Distance);
+          
+#ifdef INT_FP_OPS
+          if (ExtendedInstructionType == L1_LOAD_NODE) {
+            Q[0] += AccessGranularities[nCompExecutionUnits + 0];
+            Q[4] += AccessGranularities[nCompExecutionUnits + 0];
+            //  fprintf(stderr, "\tL1\n");
+          } else if (ExtendedInstructionType == L2_LOAD_NODE) {
+            Q[1] += AccessGranularities[nCompExecutionUnits + 2];
+            Q[4] += AccessGranularities[nCompExecutionUnits + 2];
+            //  fprintf(stderr, "\tL2\n");
+          } else if (ExtendedInstructionType == L3_LOAD_NODE) {
+            Q[2] += AccessGranularities[nCompExecutionUnits + 3];
+            Q[4] += AccessGranularities[nCompExecutionUnits + 3];
+            //  fprintf(stderr, "\tL3\n");
+          } else if (ExtendedInstructionType == MEM_LOAD_NODE) {
+            Q[3] += AccessGranularities[nCompExecutionUnits + 4];
+            Q[4] += AccessGranularities[nCompExecutionUnits + 4];
+            //  fprintf(stderr, "\tMem\n");
+          } else {
+            report_fatal_error("Load Mem op has nowhere to live");
+          }
+#endif
+          
           ExecutionResource = ExecutionUnit[ExtendedInstructionType];
           Latency =ExecutionUnitsLatency[ExecutionResource];
           // UpdateInstructionCount(InstructionType,ExtendedInstructionType, NElementsVector, IsVectorInstruction);
@@ -3888,6 +4441,8 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
 #ifdef DEBUG_REUSE_DISTANCE
           DEBUG(dbgs() << "ExtendedInstructionType " << ExtendedInstructionType << "\n");
           DEBUG(dbgs() << "Load latency "<< Latency	 << "\n");
+          DEBUG(dbgs() << "Reuse distance " << Distance << "\n");
+          
 #endif
           
           InstructionIssueFetchCycle = InstructionFetchCycle;
@@ -3944,86 +4499,122 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
                                               InstructionIssueDataDeps), InstructionIssueCacheLineAvailable),
                                       InstructionIssueMemoryModel);
           
-          // Once all previous constraints have been satisfied, check AGU availability, if any
           
-          DEBUG(dbgs() << "*********** Checking availability in AGUs *******************\n");
           
-          //First, check in dedicated AGUs.
-          if (nLoadAGUs > 0) {
-            InstructionIssueLoadAGUAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle, LOAD_ADDRESS_GENERATION_UNIT, LOAD_AGU_NODE);
+          if (ConstraintAGUs){
+            // Once all previous constraints have been satisfied, check AGU availability, if any
             
-          }
-          
-          // Check in shared (loads/stores) AGUs if any, and if there is no available in
-          // dedicated AGU
-          if (!(nLoadAGUs > 0 && InstructionIssueLoadAGUAvailable == InstructionIssueCycle) &&  nAGUs > 0) {
-            InstructionIssueAGUAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle, ADDRESS_GENERATION_UNIT, AGU_NODE);
-          }
-          
-          // Insert but check that there are AGUs.
-          if (nLoadAGUs > 0 && InstructionIssueLoadAGUAvailable >= InstructionIssueAGUAvailable) {
-            InsertNextAvailableIssueCycle(InstructionIssueLoadAGUAvailable, LOAD_ADDRESS_GENERATION_UNIT, LOAD_AGU_NODE);
-          }else{
-            if (nAGUs > 0) {
-              InsertNextAvailableIssueCycle(InstructionIssueAGUAvailable, ADDRESS_GENERATION_UNIT,AGU_NODE);
+            DEBUG(dbgs() << "*********** Checking availability in AGUs *******************\n");
+            
+            //First, check in dedicated AGUs.
+            if (nLoadAGUs > 0) {
+              InstructionIssueLoadAGUAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle, LOAD_ADDRESS_GENERATION_UNIT, LOAD_AGU_NODE);
+              
             }
-          }
-          
-          //Store specific AGU
-          if (nLoadAGUs > 0) {
-            InstructionIssueCycle = max(InstructionIssueCycle, min(InstructionIssueAGUAvailable, InstructionIssueLoadAGUAvailable));
+            
+            // Check in shared (loads/stores) AGUs if any, and if there is no available in
+            // dedicated AGU
+            if (!(nLoadAGUs > 0 && InstructionIssueLoadAGUAvailable == InstructionIssueCycle) &&  nAGUs > 0) {
+              InstructionIssueAGUAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle, ADDRESS_GENERATION_UNIT, AGU_NODE);
+            }
+            
+            // Insert but check that there are AGUs.
+            if (nLoadAGUs > 0 && InstructionIssueLoadAGUAvailable >= InstructionIssueAGUAvailable) {
+              InsertNextAvailableIssueCycle(InstructionIssueLoadAGUAvailable, LOAD_ADDRESS_GENERATION_UNIT, LOAD_AGU_NODE);
+            }else{
+              if (nAGUs > 0) {
+                InsertNextAvailableIssueCycle(InstructionIssueAGUAvailable, ADDRESS_GENERATION_UNIT,AGU_NODE);
+              }
+            }
+            
+            //Store specific AGU
+            if (nLoadAGUs > 0) {
+              InstructionIssueCycle = max(InstructionIssueCycle, min(InstructionIssueAGUAvailable, InstructionIssueLoadAGUAvailable));
+            }else{
+              InstructionIssueCycle = max(InstructionIssueCycle, InstructionIssueAGUAvailable);
+            }
           }else{
-            InstructionIssueCycle = max(InstructionIssueCycle, InstructionIssueAGUAvailable);
+            InstructionIssueAGUAvailable = InstructionIssueCycle;
           }
           
-          
-          DEBUG(dbgs() << "*********** Checking availability in Ports *******************\n");
           
           unsigned Port = 0;
           
           if (LoadBufferSize>0) {
-            // Find next available issue cycle in the port as soon as the store
-            // buffer is available (and all previous constraints have been satisfied)
-            InstructionIssuePortAvailable = InstructionIssueCycle;
-            DEBUG(dbgs () << "ExtendedInstructionType " << NodesNames[ExtendedInstructionType] << "\n");
-            DEBUG(dbgs () << "ExecutionResource " << ResourcesNames[ExecutionResource] << "\n");
-            for (unsigned i = 0; i < DispatchPort[ExtendedInstructionType].size(); i++) {
-              DEBUG(dbgs() << "Finding availability in port " << ExecutionPort[DispatchPort[ExtendedInstructionType][i]] << "\n");
-              InstructionIssuePortAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle, ExecutionPort[DispatchPort[ExtendedInstructionType][i]], PortNodes[DispatchPort[ExtendedInstructionType][i]]);
+            
+            if (ConstraintPorts) {
+#ifdef DEBUG_GENERIC
+              DEBUG(dbgs() << "*********** Checking availability in Ports *******************\n");
+#endif
               
-              if (InstructionIssuePortAvailable!= InstructionIssueCycle){
-                if (i==0) {
-                  InstructionIssueCycleFirstTimeAvailable = InstructionIssuePortAvailable;
-                }else{
-                  InstructionIssuePortAvailable = min(InstructionIssuePortAvailable, InstructionIssueCycleFirstTimeAvailable);
-                  if (InstructionIssuePortAvailable == InstructionIssueCycleFirstTimeAvailable) {
-                    Port = i;
-                    if (InstructionIssuePortAvailable == InstructionIssueCycle)
-                      break;
+              // Find next available issue cycle in the port as soon as the store
+              // buffer is available (and all previous constraints have been satisfied)
+              InstructionIssuePortAvailable = InstructionIssueCycle;
+#ifdef DEBUG_GENERIC
+              DEBUG(dbgs () << "ExtendedInstructionType " << NodesNames[ExtendedInstructionType] << "\n");
+              DEBUG(dbgs () << "ExecutionResource " << ResourcesNames[ExecutionResource] << "\n");
+#endif
+              for (unsigned i = 0; i < DispatchPort[ExtendedInstructionType].size(); i++) {
+#ifdef DEBUG_GENERIC
+                DEBUG(dbgs() << "Finding availability in port " << ExecutionPort[DispatchPort[ExtendedInstructionType][i]] << "\n");
+#endif
+                InstructionIssuePortAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle, ExecutionPort[DispatchPort[ExtendedInstructionType][i]], PortNodes[DispatchPort[ExtendedInstructionType][i]]);
+                
+                if (InstructionIssuePortAvailable!= InstructionIssueCycle){
+                  if (i==0) {
+                    InstructionIssueCycleFirstTimeAvailable = InstructionIssuePortAvailable;
+                  }else{
+                    InstructionIssuePortAvailable = min(InstructionIssuePortAvailable, InstructionIssueCycleFirstTimeAvailable);
+                    if (InstructionIssuePortAvailable == InstructionIssueCycleFirstTimeAvailable) {
+                      Port = i;
+                      if (InstructionIssuePortAvailable == InstructionIssueCycle)
+                        break;
+                    }
                   }
+                }else{
+                  // If Node is NULL, it is available for sure.
+#ifdef DEBUG_GENERIC
+                  DEBUG(dbgs() << "Port is "<<DispatchPort[ExtendedInstructionType][i] <<"\n");
+#endif
+                  Port = i;
+                  break;
                 }
-              }else{
-                // If Node is NULL, it is available for sure.
-                DEBUG(dbgs() << "Port is "<<DispatchPort[ExtendedInstructionType][i] <<"\n");
-                Port = i;
-                break;
               }
+              
+              InsertNextAvailableIssueCycle(InstructionIssuePortAvailable, ExecutionPort[DispatchPort[ExtendedInstructionType][Port]],PortNodes[DispatchPort[ExtendedInstructionType][Port]]);
+              
+              InstructionIssueCycle = max(InstructionIssueCycle, InstructionIssuePortAvailable);
+              
+            }else{
+              InstructionIssuePortAvailable = InstructionIssueCycle;
             }
-            
-            InsertNextAvailableIssueCycle(InstructionIssuePortAvailable, ExecutionPort[DispatchPort[ExtendedInstructionType][Port]],PortNodes[DispatchPort[ExtendedInstructionType][Port]]);
-            
-            InstructionIssueCycle = max(InstructionIssueCycle, InstructionIssuePortAvailable);
-            
             // Finally, find and insert issue cycle in the corresponding store resource
+#ifdef DEBUG_GENERIC
             DEBUG(dbgs() << "*********** Checking availability in Resource *******************\n");
+#endif
             
             InstructionIssueThroughputAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle, ExecutionResource, ExtendedInstructionType);
+            
             InsertNextAvailableIssueCycle(InstructionIssueThroughputAvailable, ExecutionResource,ExtendedInstructionType);
+            
           }else{
-            //If there is no load buffer, there must be available cycle in both, the dispatch port
-            // and the resource
-            InstructionIssueThroughputAvailable = FindNextAvailableIssueCyclePortAndThroughtput(InstructionIssueCycle,ExtendedInstructionType, NElementsVector);
+            if (ConstraintPorts) {
+#ifdef DEBUG_GENERIC
+              DEBUG(dbgs() << "*********** Checking availability in Ports *******************\n");
+#endif
+              //If there is no load buffer, there must be available cycle in both, the dispatch port
+              // and the resource
+              InstructionIssueThroughputAvailable = FindNextAvailableIssueCyclePortAndThroughtput(InstructionIssueCycle,ExtendedInstructionType, NElementsVector);
+            }else{
+              
+              InstructionIssueThroughputAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle,ExecutionResource, ExtendedInstructionType);
+              
+              InsertNextAvailableIssueCycle(InstructionIssueThroughputAvailable, ExecutionResource, ExtendedInstructionType);
+              
+            }
           }
+          
+          
           InstructionIssueCycle = max(InstructionIssueCycle, InstructionIssueThroughputAvailable);
           
 #ifdef DEBUG_ISSUE_CYCLE
@@ -4060,6 +4651,29 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
           Info = getCacheLineInfo(StoreCacheLine);
           Distance = ReuseDistance(LastAccess, TotalInstructions, CacheLine);
           ExtendedInstructionType = GetExtendedInstructionType(Instruction::Store, Distance);
+          
+#ifdef INT_FP_OPS
+          if (ExtendedInstructionType == L1_STORE_NODE) {
+            Q[0] += AccessGranularities[nCompExecutionUnits + 1];
+            Q[4] += AccessGranularities[nCompExecutionUnits + 1];
+            //fprintf(stderr, "\tL1\n");
+          } else if (ExtendedInstructionType == L2_STORE_NODE) {
+            Q[1] += AccessGranularities[nCompExecutionUnits + 2];
+            Q[4] += AccessGranularities[nCompExecutionUnits + 2];
+            //fprintf(stderr, "\tL2\n");
+          } else if (ExtendedInstructionType == L3_STORE_NODE) {
+            Q[2] += AccessGranularities[nCompExecutionUnits + 3];
+            Q[4] += AccessGranularities[nCompExecutionUnits + 3];
+            //fprintf(stderr, "\tL3\n");
+          } else if (ExtendedInstructionType == MEM_STORE_NODE) {
+            Q[3] += AccessGranularities[nCompExecutionUnits + 4];
+            Q[4] += AccessGranularities[nCompExecutionUnits + 4];
+            //fprintf(stderr, "\tMem\n");
+          } else {
+            report_fatal_error("Store Mem op has nowhere to live");
+          }
+#endif
+          
           ExecutionResource = ExecutionUnit[ExtendedInstructionType];
           Latency =ExecutionUnitsLatency[ExecutionResource];
           // Do not update anymore, udpate in InsertNextAvailableIssueCycle so that
@@ -4118,8 +4732,10 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
           // New for memory model
           if (x86MemoryModel) {
             // Writes are not reordered with other writes
+#ifdef DEBUG_GENERIC
             DEBUG(dbgs() << "LastStoreIssueCycle " << LastStoreIssueCycle << "\n");
             DEBUG(dbgs() << "LastLoadIssueCycle " << LastLoadIssueCycle << "\n");
+#endif
             InstructionIssueMemoryModel = LastStoreIssueCycle;
             // Writes are not reordered with earlier reads
             // The memory-ordering model ensures that a store by a processor may not occur before a previous load by the same processor.
@@ -4128,98 +4744,124 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
           
           InstructionIssueCycle = max(max(max(max(InstructionIssueFetchCycle, InstructionIssueStoreBufferAvailable), InstructionIssueDataDeps), InstructionIssueCacheLineAvailable),InstructionIssueMemoryModel);
           
-          // Once all previous constraints have been satisfied, check AGU availability, if any
-          DEBUG(dbgs() << "*********** Checking availability in AGUs *******************\n");
-          
-          //First, check in dedicated AGUs.
-          if (nStoreAGUs > 0) {
-            InstructionIssueStoreAGUAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle, STORE_ADDRESS_GENERATION_UNIT, STORE_AGU_NODE);
-          }
-          
-          // Check in shared (loads/stores) AGUs if any, and if there is no available in
-          // dedicated AGU
-          if (!(nStoreAGUs > 0 && InstructionIssueStoreAGUAvailable == InstructionIssueCycle) &&  nAGUs > 0) {
-            InstructionIssueAGUAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle, ADDRESS_GENERATION_UNIT, AGU_NODE);
-          }
-          
-          // Insert but check that there are AGUs.
-          if (nStoreAGUs > 0 && InstructionIssueStoreAGUAvailable >= InstructionIssueAGUAvailable) {
-            InsertNextAvailableIssueCycle(InstructionIssueStoreAGUAvailable, STORE_ADDRESS_GENERATION_UNIT,  STORE_AGU_NODE);
-          }else{
-            if (nAGUs > 0) {
-              InsertNextAvailableIssueCycle(InstructionIssueAGUAvailable, ADDRESS_GENERATION_UNIT,AGU_NODE);
+          if (ConstraintAGUs) {
+            
+            // Once all previous constraints have been satisfied, check AGU availability, if any
+#ifdef DEBUG_GENERIC
+            DEBUG(dbgs() << "*********** Checking availability in AGUs *******************\n");
+#endif
+            //First, check in dedicated AGUs.
+            if (nStoreAGUs > 0) {
+              InstructionIssueStoreAGUAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle, STORE_ADDRESS_GENERATION_UNIT, STORE_AGU_NODE);
             }
-          }
-          
-          //Store specific AGU
-          
-          if (nStoreAGUs > 0) {
-            InstructionIssueCycle = max(InstructionIssueCycle, min(InstructionIssueAGUAvailable, InstructionIssueStoreAGUAvailable));
+            
+            // Check in shared (loads/stores) AGUs if any, and if there is no available in
+            // dedicated AGU
+            if (!(nStoreAGUs > 0 && InstructionIssueStoreAGUAvailable == InstructionIssueCycle) &&  nAGUs > 0) {
+              InstructionIssueAGUAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle, ADDRESS_GENERATION_UNIT, AGU_NODE);
+            }
+            
+            // Insert but check that there are AGUs.
+            if (nStoreAGUs > 0 && InstructionIssueStoreAGUAvailable >= InstructionIssueAGUAvailable) {
+              InsertNextAvailableIssueCycle(InstructionIssueStoreAGUAvailable, STORE_ADDRESS_GENERATION_UNIT,  STORE_AGU_NODE);
+            }else{
+              if (nAGUs > 0) {
+                InsertNextAvailableIssueCycle(InstructionIssueAGUAvailable, ADDRESS_GENERATION_UNIT,AGU_NODE);
+              }
+            }
+            
+            //Store specific AGU
+            
+            if (nStoreAGUs > 0) {
+              InstructionIssueCycle = max(InstructionIssueCycle, min(InstructionIssueAGUAvailable, InstructionIssueStoreAGUAvailable));
+            }else{
+              InstructionIssueCycle = max(InstructionIssueCycle, InstructionIssueAGUAvailable);
+            }
+            
           }else{
-            InstructionIssueCycle = max(InstructionIssueCycle, InstructionIssueAGUAvailable);
+            InstructionIssueAGUAvailable = InstructionIssueCycle;
           }
-          
-          
           // When a cache line is writen does not impact when in can be loaded again.
           updateReuseDistanceDistribution(Distance, InstructionIssueCycle);
           //insertCacheLineInfo(StoreCacheLine, Info);
           insertCacheLineLastAccess(StoreCacheLine, TotalInstructions );
-          
+#ifdef DEBUG_GENERIC
           DEBUG(dbgs() << "CacheLine " << CacheLine << "\n");
           DEBUG(dbgs() << "StoreCacheLine " << StoreCacheLine << "\n");
           
+#endif
           
-          DEBUG(dbgs() << "*********** Checking availability in Ports *******************\n");
           // If there is a store buffer, the dipatch cycle might be different from
           // the issue (execution) cycle.
           unsigned Port = 0;
           if (StoreBufferSize>0) {
-            // Find next available issue cycle in the port as soon as the store
-            // buffer is available (and all previous constraints have been satisfied)
-            InstructionIssuePortAvailable = InstructionIssueCycle;
-            DEBUG(dbgs () << "ExtendedInstructionType " << NodesNames[ExtendedInstructionType] << "\n");
-            DEBUG(dbgs () << "ExecutionResource " << ResourcesNames[ExecutionResource] << "\n");
-            for (unsigned i = 0; i < DispatchPort[ExtendedInstructionType].size(); i++) {
-              DEBUG(dbgs() << "Finding availability in port " << ResourcesNames[ExecutionPort[DispatchPort[ExtendedInstructionType][i]]] << "\n");
-              InstructionIssuePortAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle, ExecutionPort[DispatchPort[ExtendedInstructionType][i]], PortNodes[DispatchPort[ExtendedInstructionType][i]]);
-              if (InstructionIssuePortAvailable!= InstructionIssueCycle){
-                if (i==0) {
-                  InstructionIssueCycleFirstTimeAvailable = InstructionIssuePortAvailable;
-                }else{
-                  InstructionIssuePortAvailable = min(InstructionIssuePortAvailable, InstructionIssueCycleFirstTimeAvailable);
-                  if (InstructionIssuePortAvailable == InstructionIssueCycleFirstTimeAvailable) {
-                    Port = i;
-                    if (InstructionIssuePortAvailable == InstructionIssueCycle)
-                      break;
+            if (ConstraintPorts) {
+              DEBUG(dbgs() << "*********** Checking availability in Ports *******************\n");
+              
+              // Find next available issue cycle in the port as soon as the store
+              // buffer is available (and all previous constraints have been satisfied)
+              InstructionIssuePortAvailable = InstructionIssueCycle;
+#ifdef DEBUG_GENERIC
+              DEBUG(dbgs () << "ExtendedInstructionType " << NodesNames[ExtendedInstructionType] << "\n");
+              DEBUG(dbgs () << "ExecutionResource " << ResourcesNames[ExecutionResource] << "\n");
+#endif
+              for (unsigned i = 0; i < DispatchPort[ExtendedInstructionType].size(); i++) {
+#ifdef DEBUG_GENERIC
+                DEBUG(dbgs() << "Finding availability in port " << ResourcesNames[ExecutionPort[DispatchPort[ExtendedInstructionType][i]]] << "\n");
+#endif
+                InstructionIssuePortAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle, ExecutionPort[DispatchPort[ExtendedInstructionType][i]], PortNodes[DispatchPort[ExtendedInstructionType][i]]);
+                if (InstructionIssuePortAvailable!= InstructionIssueCycle){
+                  if (i==0) {
+                    InstructionIssueCycleFirstTimeAvailable = InstructionIssuePortAvailable;
+                  }else{
+                    InstructionIssuePortAvailable = min(InstructionIssuePortAvailable, InstructionIssueCycleFirstTimeAvailable);
+                    if (InstructionIssuePortAvailable == InstructionIssueCycleFirstTimeAvailable) {
+                      Port = i;
+                      if (InstructionIssuePortAvailable == InstructionIssueCycle)
+                        break;
+                    }
                   }
-                }
-              }else{
-                // If Node is NULL, it is available for sure.
-                DEBUG(dbgs() << "Port is "<<DispatchPort[ExtendedInstructionType][i] <<"\n");
-                Port = i;
-                break;
-              }            }
-            
-            
-            InsertNextAvailableIssueCycle(InstructionIssuePortAvailable, ExecutionPort[DispatchPort[ExtendedInstructionType][Port]],PortNodes[DispatchPort[ExtendedInstructionType][Port]]);
-            
-            InstructionIssueCycle = max(InstructionIssueCycle, InstructionIssuePortAvailable);
-            
+                }else{
+                  // If Node is NULL, it is available for sure.
+#ifdef DEBUG_GENERIC
+                  DEBUG(dbgs() << "Port is "<<DispatchPort[ExtendedInstructionType][i] <<"\n");
+#endif
+                  Port = i;
+                  break;
+                }            }
+              
+              
+              InsertNextAvailableIssueCycle(InstructionIssuePortAvailable, ExecutionPort[DispatchPort[ExtendedInstructionType][Port]],PortNodes[DispatchPort[ExtendedInstructionType][Port]]);
+              
+              InstructionIssueCycle = max(InstructionIssueCycle, InstructionIssuePortAvailable);
+            }else{
+              InstructionIssuePortAvailable = InstructionIssueCycle;
+            }
             // Finally, calculate issue cycle depending on resource availability
+#ifdef DEBUG_GENERIC
             DEBUG(dbgs() << "*********** Checking availability in Resource *******************\n");
-            
+#endif
             InstructionIssueThroughputAvailable = FindNextAvailableIssueCycle(InstructionIssueCycle, ExecutionResource, ExtendedInstructionType);
             
             InsertNextAvailableIssueCycle(InstructionIssueThroughputAvailable, ExecutionResource,ExtendedInstructionType);
             
+            
           }else{
-            InstructionIssueThroughputAvailable= FindNextAvailableIssueCyclePortAndThroughtput(InstructionIssueCycle,ExtendedInstructionType, NElementsVector);
+            if (ConstraintPorts) {
+              
+              InstructionIssueThroughputAvailable= FindNextAvailableIssueCyclePortAndThroughtput(InstructionIssueCycle,ExtendedInstructionType, NElementsVector);
+            }else{
+              
+              InstructionIssueThroughputAvailable= FindNextAvailableIssueCycle(InstructionIssueCycle,ExecutionResource, ExtendedInstructionType);
+              
+              InsertNextAvailableIssueCycle(InstructionIssueThroughputAvailable, ExecutionResource,ExtendedInstructionType);
+              
+            }
           }
           InstructionIssueCycle = max(InstructionIssueCycle, InstructionIssueThroughputAvailable);
 #ifdef DEBUG_ISSUE_CYCLE
           DEBUG(dbgs() << "======== Instruction Issue Cycle (fetch cycle) "<< InstructionIssueFetchCycle	 << " ========\n");
           DEBUG(dbgs() << "======== Instruction Issue Cycle (SB availability) "<< InstructionIssueStoreBufferAvailable	 << " ========\n");
-          DEBUG(dbgs() << "======== Instruction Issue Cycle (AGU Availability) "<< InstructionIssueAGUAvailable	 << " ========\n");
           DEBUG(dbgs() << "======== Instruction Issue Cycle (cache line available) "<< InstructionIssueCacheLineAvailable	 << " ========\n");
           DEBUG(dbgs() << "======== Instruction Issue Cycle (data deps)"<< 	InstructionIssueDataDeps << " ========\n");
           DEBUG(dbgs() << "======== Instruction Issue Cycle (memory model Principles 2 and 3) "<< InstructionIssueMemoryModel	 << " ========\n");
@@ -4246,13 +4888,10 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
           }
         }
 #else
-        for (Value::use_iterator IT = F->use_begin(), ET = F->use_end(); IT != ET; ++IT) {
-          // Iterate over the users of the uses of the function
-          for(Value::use_iterator it = (*IT)->use_begin(), ite = (*IT)->use_end(); it!=ite; ++it){
-            User *UI = *it;
-        //for (User *U : F->users()) {
+        
+        for (User *U : F->users()) {
           //  if (Instruction *Inst = dyn_cast<Instruction>(U)) {
-          //for (User *UI : U->users()) {
+          for (User *UI : U->users()) {
             // if (Instruction *i = dyn_cast<Instruction>(UI)) {
             insertInstructionValueIssueCycle(UI, InstructionIssueCycle);
             
@@ -4268,6 +4907,7 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
         if (InstructionType == 0) {
           OriginalInstructionIssueCycle = getInstructionValueIssueCycle(&I);
           InstructionIssueCycle = max(max(InstructionFetchCycle,BasicBlockBarrier),OriginalInstructionIssueCycle);
+          
           ExtendedInstructionType = GetExtendedInstructionType(I.getOpcode());
           // UpdateInstructionCount(InstructionType, ExtendedInstructionType,  NElementsVector, IsVectorInstruction);
           if (IsVectorInstruction && ExecutionResource!= FP_SHUFFLE){
@@ -4280,9 +4920,9 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
           if (InstructionIssueCycle > OriginalInstructionIssueCycle) {
             NInstructionsStalled[ExtendedInstructionType]++;
           }
-          
+#ifdef DEBUG_GENERIC
           DEBUG(dbgs() << "*********** Checking availability in Resource *******************\n");
-          
+#endif
           InstructionIssueThroughputAvailable= FindNextAvailableIssueCyclePortAndThroughtput(InstructionIssueCycle,ExtendedInstructionType, NElementsVector);
           
           InstructionIssueCycle= max(InstructionIssueCycle, InstructionIssueThroughputAvailable);
@@ -4299,12 +4939,12 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
     
     
     if (InstructionType >= 0) {
-      
+#ifdef SOURCE_CODE_ANALYSIS
+      SourceCodeLineOperations[SourceCodeLine].insert(ExecutionUnit[ExtendedInstructionType]);
+#endif
       uint64_t NewInstructionIssueCycle = InstructionIssueCycle;
       
-      //======================= NEW CODE ==========================================//
-      // If Available tree is empty or IssueCycle > InstructionsLastIssueCycle,
-      // then insert available cycle with Occupancy 1
+      
       if (x86MemoryModel) {
         if (I.getOpcode() ==Instruction::Load) {
           LastLoadIssueCycle = NewInstructionIssueCycle;
@@ -4338,7 +4978,9 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
       if (I.getOpcode() == Instruction::Store && ExtendedInstructionType > L1_STORE_NODE
           && ExecutionUnitsLatency[ExecutionResource] > ExecutionUnitsLatency[L1_LOAD_CHANNEL]) {
         //   if (Distance < 0 ){
+#ifdef DEBUG_GENERIC
         DEBUG(dbgs() << "Inserting issue cycle " << NewInstructionIssueCycle+Latency << " for cache line " << StoreCacheLine << "\n");
+#endif
         Info = getCacheLineInfo(StoreCacheLine);
         Info.IssueCycle = NewInstructionIssueCycle+Latency;
         insertCacheLineInfo(StoreCacheLine, Info);
@@ -4389,11 +5031,14 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
           
           InsertNextAvailableIssueCycle(NextCacheLineIssueCycle, ExecutionResource, NextCacheLineExtendedInstructionType, 1, true);
           
+          
+          
           Info.IssueCycle = NextCacheLineIssueCycle+LatencyPrefetch;
           Info.LastAccess = TotalInstructions;
           insertCacheLineInfo(NextCacheLine, Info);
+#ifdef DEBUG_GENERIC
           DEBUG(dbgs() << "Inserting issue cycle " <<  NextCacheLineIssueCycle+LatencyPrefetch << " for cache line " << NextCacheLine << "\n");
-          
+#endif
         }
       }
       //======================= END NEW CODE ==========================================//
@@ -4461,9 +5106,7 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
 #else
         // No interpreter: new way of iterating through the uses of an instruction.
         // TODO: Fix also iterating through the arguments
-        //for (User *U : I.users()) {
-        for(Value::use_iterator i = I.use_begin(), ie = I.use_end(); i!=ie; ++i){
-            User* U = *i;
+        for (User *U : I.users()) {
           //  if (Instruction *i = dyn_cast<Instruction>(U)) {
           // for(Value::use_iterator i = I.use_begin(), ie = I.use_end(); i!=ie; ++i){
           
@@ -4526,6 +5169,7 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
         }
 #endif
       }
+      
       
       //========================= Update Parallelism Distribution ===================//
       
@@ -4600,6 +5244,21 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
 #ifdef DEBUG_OOO_BUFFERS
             DEBUG(dbgs() << "Inserting  "<< NewInstructionIssueCycle << " to DispatchToLoadBufferQueue\n");
 #endif
+#ifdef SOURCE_CODE_ANALYSIS
+            SourceCodeLineOperations[SourceCodeLine].insert(LB_STALL);
+            unsigned TreeChunk = 0;
+            for (uint64_t i = InstructionFetchCycle; i < CycleInsertReservationStation; i++) {
+#ifdef DEBUG_SOURCE_CODE_ANALYSIS
+              DEBUG(dbgs()<< "LB_STALL for source code line " << SourceCodeLine << " in cycle " << i << "\n");
+#endif
+              TreeChunk = GetTreeChunk(i);
+              FullOccupancyCyclesTree[TreeChunk] = insert_node(i, LB_STALL,FullOccupancyCyclesTree[TreeChunk]);
+              
+              FullOccupancyCyclesTree[TreeChunk]->SourceCodeLines.insert(SourceCodeLine);
+            }
+            
+#endif
+            
             
             // If, moreover, the instruction has to go to the LineFillBuffer...
             if (ExtendedInstructionType >= L2_LOAD_NODE && LineFillBufferSize > 0) {
@@ -4611,6 +5270,23 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
 #ifdef DEBUG_OOO_BUFFERS
                 DEBUG(dbgs() << "Inserting  "<< DispathInfo.IssueCycle  << " to DispatchToLineFillBufferQueue\n");
 #endif
+#ifdef SOURCE_CODE_ANALYSIS
+                SourceCodeLineOperations[SourceCodeLine].insert(LFB_STALL);
+                
+                
+                unsigned TreeChunk = 0;
+                for (uint64_t i = InstructionFetchCycle; i < CycleInsertReservationStation; i++) {
+#ifdef DEBUG_SOURCE_CODE_ANALYSIS
+                  DEBUG(dbgs()<< "LFB_STALL for source code line " << SourceCodeLine << " in cycle " << i << "\n");
+#endif
+                  TreeChunk = GetTreeChunk(i);
+                  FullOccupancyCyclesTree[TreeChunk] = insert_node(i, LFB_STALL,FullOccupancyCyclesTree[TreeChunk]);
+                  
+                  FullOccupancyCyclesTree[TreeChunk]->SourceCodeLines.insert(SourceCodeLine);
+                }
+#endif
+                
+                
               }else{ // There is space on both
 #ifdef DEBUG_OOO_BUFFERS
                 DEBUG(dbgs() << "Inserting  "<< NewInstructionIssueCycle+Latency << " to Line Fill Buffer\n");
@@ -4669,11 +5345,28 @@ DynamicAnalysis::analyzeInstruction(Instruction &I, uint64_t addr)
               ReservationStationIssueCycles.push_back(CycleInsertReservationStation);
               InstructionDispatchInfo DispathInfo;
               //  DispathInfo.IssueCycle = NewInstructionIssueCycle;
+              //TODO: Isn't it CycleInsertReservationStation?
               DispathInfo.IssueCycle = FindIssueCycleWhenStoreBufferIsFull();
               DispathInfo.CompletionCycle = NewInstructionIssueCycle+Latency;
               DispatchToStoreBufferQueue.push_back(DispathInfo);
 #ifdef DEBUG_OOO_BUFFERS
               DEBUG(dbgs() << "Inserting  "<< NewInstructionIssueCycle << " to DispatchToStoreBufferQueue\n");
+#endif
+#ifdef SOURCE_CODE_ANALYSIS
+              SourceCodeLineOperations[SourceCodeLine].insert(SB_STALL);
+              
+              
+              unsigned TreeChunk = 0;
+              for (uint64_t i = InstructionFetchCycle; i < CycleInsertReservationStation; i++) {
+#ifdef DEBUG_SOURCE_CODE_ANALYSIS
+                DEBUG(dbgs()<< "SB_STALL for source code line " << SourceCodeLine << " in cycle " << i << "\n");
+#endif
+                TreeChunk = GetTreeChunk(i);
+                FullOccupancyCyclesTree[TreeChunk] = insert_node(i, SB_STALL,FullOccupancyCyclesTree[TreeChunk]);
+                
+                FullOccupancyCyclesTree[TreeChunk]->SourceCodeLines.insert(SourceCodeLine);
+              }
+              
 #endif
             }else{ // If it is not full
               if (StoreBufferCompletionCycles.size()!=StoreBufferSize  && StoreBufferSize > 0 ) {
@@ -4764,402 +5457,879 @@ DynamicAnalysis::finishAnalysis(){
   vector< vector<uint64_t> > ResourcesIssueStallSpanVector(nExecutionUnits, vector<uint64_t>(nBuffers));
   
 #ifdef DEBUG_OOO_BUFFERS
-  DEBUG(dbgs() << "Starting while loop\n";
-        DEBUG(dbgs() << "Sise of RS "<< ReservationStationIssueCycles.size()<<"\n");
-        DEBUG(dbgs() << "Sise of ROB "<<ReorderBufferCompletionCycles.size()<<"\n");
-        DEBUG(dbgs() << "Sise of LB "<< LineFillBufferCompletionCycles.size() <<"\n");
-        DEBUG(dbgs() << "Sise of SB "<< StoreBufferCompletionCycles.size() <<"\n");
-        DEBUG(dbgs() << "Sise of LFB "<< LineFillBufferCompletionCycles.size() <<"\n");
-        DEBUG(dbgs() << "______________________________________________________\n");
+  DEBUG(dbgs() << "Starting while loop\n");
+  DEBUG(dbgs() << "Sise of RS "<< ReservationStationIssueCycles.size()<<"\n");
+  DEBUG(dbgs() << "Sise of ROB "<<ReorderBufferCompletionCycles.size()<<"\n");
+  DEBUG(dbgs() << "Sise of LB "<< LineFillBufferCompletionCycles.size() <<"\n");
+  DEBUG(dbgs() << "Sise of SB "<< StoreBufferCompletionCycles.size() <<"\n");
+  DEBUG(dbgs() << "Sise of LFB "<< LineFillBufferCompletionCycles.size() <<"\n");
+  DEBUG(dbgs() << "______________________________________________________\n");
 #endif
-        
-        
-        // Increase FetchCycle until all buffers are empty
-        while (ReservationStationIssueCycles.size() != 0 || ReorderBufferCompletionCycles.size() != 0 || LoadBufferCompletionCycles.size() != 0 || StoreBufferCompletionCycles.size() != 0 || LineFillBufferCompletionCycles.size() != 0) {
-          // In IncreaseInstructionFetchCycle(), InstructionFetchCycle only increases when
-          // RS or ROB are full. But in this case, they may not get full, but we just
-          // want to empty them
-          InstructionFetchCycle++;
-          IncreaseInstructionFetchCycle();
-          
+  
+  
+  // Increase FetchCycle until all buffers are empty
+  while (ReservationStationIssueCycles.size() != 0 || ReorderBufferCompletionCycles.size() != 0 || LoadBufferCompletionCycles.size() != 0 || StoreBufferCompletionCycles.size() != 0 || LineFillBufferCompletionCycles.size() != 0) {
+    // In IncreaseInstructionFetchCycle(), InstructionFetchCycle only increases when
+    // RS or ROB are full. But in this case, they may not get full, but we just
+    // want to empty them
+    // We don't increase fetch cycle here anymore because it is increased in the
+    // function IncreaseInstructionFetchCycle() by setting the argument to true
+    //  InstructionFetchCycle++;
+    IncreaseInstructionFetchCycle(true);
+    
 #ifdef DEBUG_OOO_BUFFERS
-          
-          PrintReservationStation();
-          PrintReorderBuffer();
-          PrintStoreBuffer();
-          PrintLoadBuffer();
-          PrintLineFillBuffer();
-          
-          DEBUG(dbgs() << "Size of RS "<< ReservationStationIssueCycles.size()<<"\n");
-          DEBUG(dbgs() << "Size of ROB "<<ReorderBufferCompletionCycles.size()<<"\n");
-          DEBUG(dbgs() << "Size of LB "<< LineFillBufferCompletionCycles.size() <<"\n");
-          DEBUG(dbgs() << "Size of SB "<< StoreBufferCompletionCycles.size() <<"\n");
-          DEBUG(dbgs() << "Size of LFB "<< LineFillBufferCompletionCycles.size() <<"\n");
-          DEBUG(dbgs() << "______________________________________________________\n");
+    
+    PrintReservationStation();
+    PrintReorderBuffer();
+    PrintStoreBuffer();
+    PrintLoadBufferTree();
+    // PrintLoadBuffer();
+    PrintLineFillBuffer();
+    
+    DEBUG(dbgs() << "Size of RS "<< ReservationStationIssueCycles.size()<<"\n");
+    DEBUG(dbgs() << "Size of ROB "<<ReorderBufferCompletionCycles.size()<<"\n");
+    DEBUG(dbgs() << "Size of LB "<< LineFillBufferCompletionCycles.size() <<"\n");
+    DEBUG(dbgs() << "Size of SB "<< StoreBufferCompletionCycles.size() <<"\n");
+    DEBUG(dbgs() << "Size of LFB "<< LineFillBufferCompletionCycles.size() <<"\n");
+    DEBUG(dbgs() << "______________________________________________________\n");
 #endif
-          
-        }
-        
+    
+  }
+  
 #ifdef DEBUG_OOO_BUFFERS
-        
-        DEBUG(dbgs() << "Size of RS "<< ReservationStationIssueCycles.size()<<"\n");
-        DEBUG(dbgs() << "Size of ROB "<<ReorderBufferCompletionCycles.size()<<"\n");
-        DEBUG(dbgs() << "Size of LB "<< LineFillBufferCompletionCycles.size() <<"\n");
-        DEBUG(dbgs() << "Size of SB "<< StoreBufferCompletionCycles.size() <<"\n");
-        DEBUG(dbgs() << "Size of LFB "<< LineFillBufferCompletionCycles.size() <<"\n");
+  
+  DEBUG(dbgs() << "Size of RS "<< ReservationStationIssueCycles.size()<<"\n");
+  DEBUG(dbgs() << "Size of ROB "<<ReorderBufferCompletionCycles.size()<<"\n");
+  DEBUG(dbgs() << "Size of LB "<< LineFillBufferCompletionCycles.size() <<"\n");
+  DEBUG(dbgs() << "Size of SB "<< StoreBufferCompletionCycles.size() <<"\n");
+  DEBUG(dbgs() << "Size of LFB "<< LineFillBufferCompletionCycles.size() <<"\n");
 #endif
-        
-        
-        
-        
-        for (unsigned i = 0; i < nCompNodes; i++)
-        compResources.push_back(i);
-        
-        for (unsigned i = N_MEM_NODES_START ; i <= N_MEM_NODES_END; i++)
-        memResources.push_back(i);
-        
-        for (unsigned j = 0; j < nExecutionUnits + nAGUs + nPorts + nBuffers; j++){
-          LastIssueCycleVector.push_back(GetLastIssueCycle(j, false));
-          
-          if (InstructionFetchCycle != 0 && LastIssueCycleVector[j] > InstructionFetchCycle) {
-            report_fatal_error("LastIssueCycle > InstructionFetchCycle for resource\n");
-          }
-        }
-        for (unsigned j=0; j< nExecutionUnits; j++) {
-          TmpResourcesVector.clear();
-          TmpResourcesVector.push_back(j);
-          IssueSpan[j] = CalculateIssueSpan(TmpResourcesVector);
-        }
-        
-        
-        
-        // We have this loop in case we want to print out stats with all computation nodes
-        // merged, needed to generate the original roofline plots. But if we don't need
-        // them, we just print the data without merging FP ops.
-        for (int i = 0; i < 1 ; i++) {
-          
-          DEBUG(dbgs() << "i " << i << "\n");
-          
-          if (i==1)
-            MergeArithmeticOps = true;
-          
-          if (MergeArithmeticOps) {
-            InstructionsCountExtended[FP_ADDER] = InstructionsCountExtended[FP_ADDER]+ InstructionsCountExtended[FP_MULTIPLIER]+InstructionsCountExtended[FP_DIVIDER];
-            
-            TmpResourcesVector.clear();
-            TmpResourcesVector.push_back(FP_ADDER);
-            TmpResourcesVector.push_back(FP_MULTIPLIER);
-            TmpResourcesVector.push_back(FP_DIVIDER);
-            
-            IssueSpan[FP_ADDER] = CalculateIssueSpan(TmpResourcesVector);
-          }
-          
-          for (unsigned j=0; j< nExecutionUnits; j++) {
-            if (!(MergeArithmeticOps && j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER)) {
-              if (MergeArithmeticOps && j == FP_ADDER) {
-                TmpResourcesVector.clear();
-                TmpResourcesVector.push_back(j);
-                TmpResourcesVector.push_back(j+1);
-                TmpResourcesVector.push_back(j+2);
-                Span =CalculateGroupSpan(TmpResourcesVector);
-                ResourcesSpan[j] = Span;
-              }else{
-                if (!MergeArithmeticOps) { // Calculate only once
-                  TmpResourcesVector.clear();
-                  TmpResourcesVector.push_back(j);
-                  DEBUG(dbgs() << "Calculating group span for resource " << j << "\n");
-                  Span =CalculateGroupSpan(TmpResourcesVector);
-                  DEBUG(dbgs() << "Span " << Span << "\n");
-                  ResourcesSpan[j] = Span;
-                }
-              }
-              
-#ifdef ASSERT
-              if (!MergeArithmeticOps) {
-                TmpResourcesVector.clear();
-                TmpResourcesVector.push_back(j);
-                if(Span != CalculateGroupSpan(TmpResourcesVector))
-                  report_fatal_error("Span ("+Twine(Span)+" differs from CalculateGroupSpan ("+Twine(CalculateGroupSpan(TmpResourcesVector))+")");
-              }
+  
+  
+  
+  
+  for (unsigned i = 0; i < nCompNodes; i++)
+    compResources.push_back(i);
+  
+  for (unsigned i = N_MEM_NODES_START ; i <= N_MEM_NODES_END; i++)
+    memResources.push_back(i);
+  
+  for (unsigned j = 0; j < nExecutionUnits + nAGUs + nPorts + nBuffers; j++){
+    LastIssueCycleVector.push_back(GetLastIssueCycle(j, false));
+    
+    // If all buffers sizes are infinity, or a buffer does not get full, we don't
+    // increment in the previous while loop InstructionFetchCycle. So this check
+    // only makes sense when RS or ROB have limited size (because they hold
+    // all type of instructions until they are issued)
+    if (InstructionFetchCycle != 0 && LastIssueCycleVector[j] > InstructionFetchCycle
+        && ReservationStationIssueCycles.size() != 0 && ReorderBufferCompletionCycles.size() != 0) {
+      report_fatal_error("LastIssueCycle > InstructionFetchCycle for resource\n");
+    }
+  }
+  for (unsigned j=0; j< nExecutionUnits; j++) {
+    TmpResourcesVector.clear();
+    TmpResourcesVector.push_back(j);
+    IssueSpan[j] = CalculateIssueSpan(TmpResourcesVector);
+  }
+  
+  
+  
+  // We have this loop in case we want to print out stats with all computation nodes
+  // merged, needed to generate the original roofline plots. But if we don't need
+  // them, we just print the data without merging FP ops.
+  for (int i = 0; i < 1 ; i++) {
+    
+    DEBUG(dbgs() << "i " << i << "\n");
+    
+    if (i==1)
+      MergeArithmeticOps = true;
+    
+    if (MergeArithmeticOps) {
+      TmpResourcesVector.clear();
+      
+#ifdef INT_FP_OPS
+      InstructionsCountExtended[INT_ADDER] = InstructionsCountExtended[FP_ADDER]+ InstructionsCountExtended[FP_MULTIPLIER]+InstructionsCountExtended[FP_DIVIDER] +
+      InstructionsCountExtended[INT_ADDER]+ InstructionsCountExtended[INT_MULTIPLIER]+InstructionsCountExtended[INT_DIVIDER];
+      TmpResourcesVector.push_back(INT_ADDER);
+      TmpResourcesVector.push_back(INT_MULTIPLIER);
+      TmpResourcesVector.push_back(INT_DIVIDER);
+      
+#else
+      InstructionsCountExtended[FP_ADDER] = InstructionsCountExtended[FP_ADDER]+ InstructionsCountExtended[FP_MULTIPLIER]+InstructionsCountExtended[FP_DIVIDER];
 #endif
-              
-            }
-          }
+      TmpResourcesVector.push_back(FP_ADDER);
+      TmpResourcesVector.push_back(FP_MULTIPLIER);
+      TmpResourcesVector.push_back(FP_DIVIDER);
+      
+#ifdef INT_FP_OPS
+      IssueSpan[INT_ADDER] = CalculateIssueSpan(TmpResourcesVector);
+#else
+      IssueSpan[FP_ADDER] = CalculateIssueSpan(TmpResourcesVector);
+#endif
+    }
+    
+    for (unsigned j=0; j< nExecutionUnits; j++) {
+#ifdef INT_FP_OPS
+      if (!(MergeArithmeticOps && (j==FP_MULTIPLIER || j==INT_MULTIPLIER || j==FP_ADDER)) && !(MergeArithmeticOps && (j==INT_DIVIDER || j==FP_DIVIDER)))
+#else
+        if (!(MergeArithmeticOps && j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER))
+#endif
           
-          //Span for OOO buffers
-          for (unsigned j = RS_STALL; j <= LFB_STALL; j++) {
-            
-            TmpResourcesVector.clear();
-            TmpResourcesVector.push_back(j);
-            IssueSpan[j] = CalculateIssueSpan(TmpResourcesVector);
-            
-            //Calculate span is an expensive operation. Therefore, wehenever we can, we
-            // obtain the span from a different way.
-            Span=InstructionsCountExtended[j];
-            DEBUG(dbgs() << "Span  " << Span << "\n");
-            ResourcesSpan[j] = Span;
-            DEBUG(dbgs() << "Storing span  " <<  ResourcesSpan[j] << "\n");
-#ifdef ASSERT
-            if (!MergeArithmeticOps) {
+        {
+#ifdef INT_FP_OPS
+          if (MergeArithmeticOps && j == INT_ADDER)
+#else
+            if (MergeArithmeticOps && j == FP_ADDER)
+#endif
+            {
               TmpResourcesVector.clear();
               TmpResourcesVector.push_back(j);
-              uint64_t CalculateSpanResult = CalculateSpan(j);
-              uint64_t CalculateGroupSpanResult = CalculateGroupSpan(TmpResourcesVector);
-              DEBUG(dbgs() << "CalculateGroupSpanResult  " <<  CalculateGroupSpanResult << "\n");
+              TmpResourcesVector.push_back(j+1);
+              TmpResourcesVector.push_back(j+2);
+#ifdef INT_FP_OPS
+              TmpResourcesVector.push_back(j+3);
+              TmpResourcesVector.push_back(j+4);
+              TmpResourcesVector.push_back(j+5);
+#endif
               
-              if (!( CalculateSpanResult== Span  &&  Span == CalculateGroupSpanResult))
-                report_fatal_error("Spans differ: Span (" + Twine(Span)+"), CalculateSpan ("+Twine(CalculateSpanResult)+
-                                   "), CalculateGroupSpan ("+Twine(CalculateGroupSpanResult)+")");
-            }
-#endif
-          }
-          
-#ifdef ILP_DISTRIBUTION
-          int DistributionLength = ParallelismDistribution.size();
-          unsigned long SpanDistribution = 0;
-          vector<uint64_t> InstructionsSpanDistribution;
-          for (int i = 0; i< N_INST_TYPES; i++)
-            InstructionsSpanDistribution.push_back(0);
-          
-          printHeaderStat("ILP distribution");
-          for (i=0; i< DistributionLength; i++) {
-            for(j=0; j< N_INST_TYPES; j++){
-              uint64_t NInstructions = ParallelismDistribution[i][j];
-              if (NInstructions != 0) {
-                InstructionsSpanDistribution[j]++;
-              }
-            }
-          }
-          
-          SpanDistribution = ParallelismDistribution.size();
-          
-          ParallelismDistribution.clear();
-#endif
-          
-          //Reuse Distance Distribution
-          printHeaderStat("Reuse Distance distribution");
-          
-#ifdef NORMAL_REUSE_DISTRIBUTION
-          map <int,int>::iterator ReuseDistanceMapIt;
-          for(ReuseDistanceMapIt= ReuseDistanceDistribution.begin();
-              ReuseDistanceMapIt != ReuseDistanceDistribution.end(); ++ReuseDistanceMapIt){
-            dbgs() << ReuseDistanceMapIt->first << " "<< ReuseDistanceMapIt->second<< "\n";
-          }
-#else
-          map<int,map<uint64_t,uint> >::iterator ReuseDistanceExtendedMapIt;
-          map<uint64_t,uint>::iterator AuxMapIt;
-          for (ReuseDistanceExtendedMapIt = ReuseDistanceDistributionExtended.begin();
-               ReuseDistanceExtendedMapIt != ReuseDistanceDistributionExtended.end();
-               ++ReuseDistanceExtendedMapIt) {
-            dbgs () << ReuseDistanceExtendedMapIt->first << " ";
-            for (AuxMapIt= (ReuseDistanceExtendedMapIt->second).begin();
-                 AuxMapIt != (ReuseDistanceExtendedMapIt->second).end();
-                 ++AuxMapIt) {sdz
-              dbgs() << AuxMapIt->first << " "<< AuxMapIt->second<< " ";
-            }
-            dbgs () << "\n";
-          }
-#endif
-          dbgs() << "DATA_SET_SIZE\t" << node_size(ReuseTree) << "\n";
-          
-          printHeaderStat("Statistics");
-          
-          unsigned long long InstructionLatency = 0;
-          unsigned IssueCycleGranularity = 1;
-          uint64_t LastCycle =0;
-          
-          //================= Calculate total span ==========================//
-          
-          TmpResourcesVector.clear();
-          
-          for(unsigned j=0; j< nExecutionUnits; j++){
-            
-            if (MergeArithmeticOps) {
-              if (j==FP_ADDER) {
-                TmpResourcesVector.push_back(j);
-                TmpResourcesVector.push_back(j+1);
-                TmpResourcesVector.push_back(j+2);
-                // If there are instructions of this type
-                if (InstructionsCountExtended[j]>0 || InstructionsCountExtended[j+1]>0 || InstructionsCountExtended[j+2]>0) {
-                  TotalSpan = CalculateGroupSpan(TmpResourcesVector);
-                }
-              }else{
-                if (j>FP_DIVIDER) {
-                  TmpResourcesVector.push_back(j);
-                  // If there are instructions of this type
-                  if (InstructionsCountExtended[j]>0) {
-                    IssueCycleGranularity = IssueCycleGranularities[j];
-                    InstructionLatency  =ExecutionUnitsLatency[j];
-                    LastCycle = LastIssueCycleVector[j];
-                    TotalSpan = max(LastCycle+InstructionLatency , TotalSpan);
-                  }
-                  
-                }
-              }
-              
+              Span =CalculateGroupSpan(TmpResourcesVector);
+              ResourcesSpan[j] = Span;
             }else{
+              if (!MergeArithmeticOps) { // Calculate only once
+                TmpResourcesVector.clear();
+                TmpResourcesVector.push_back(j);
+                DEBUG(dbgs() << "Calculating group span for resource " << j << "\n");
+                Span =CalculateGroupSpan(TmpResourcesVector);
+                DEBUG(dbgs() << "Span " << Span << "\n");
+                ResourcesSpan[j] = Span;
+              }
+            }
+          
+          
+        }
+    }
+    
+    //Span for OOO buffers
+    for (unsigned j = RS_STALL; j <= LFB_STALL; j++) {
+      
+      TmpResourcesVector.clear();
+      TmpResourcesVector.push_back(j);
+      IssueSpan[j] = CalculateIssueSpan(TmpResourcesVector);
+      
+      //Calculate span is an expensive operation. Therefore, wehenever we can, we
+      // obtain the span from a different way.
+      Span=InstructionsCountExtended[j];
+      DEBUG(dbgs() << "Span  " << Span << "\n");
+      ResourcesSpan[j] = Span;
+      DEBUG(dbgs() << "Storing span  " <<  ResourcesSpan[j] << "\n");
+#ifdef ASSERT
+      if (!MergeArithmeticOps) {
+        TmpResourcesVector.clear();
+        TmpResourcesVector.push_back(j);
+        uint64_t CalculateSpanResult = CalculateSpan(j);
+        uint64_t CalculateGroupSpanResult = CalculateGroupSpan(TmpResourcesVector);
+        DEBUG(dbgs() << "CalculateGroupSpanResult  " <<  CalculateGroupSpanResult << "\n");
+        
+        if (!( CalculateSpanResult== Span  &&  Span == CalculateGroupSpanResult))
+          report_fatal_error("Spans differ: Span (" + Twine(Span)+"), CalculateSpan ("+Twine(CalculateSpanResult)+
+                             "), CalculateGroupSpan ("+Twine(CalculateGroupSpanResult)+")");
+      }
+#endif
+    }
+    
+#ifdef ILP_DISTRIBUTION
+    int DistributionLength = ParallelismDistribution.size();
+    unsigned long SpanDistribution = 0;
+    vector<uint64_t> InstructionsSpanDistribution;
+    for (int i = 0; i< N_INST_TYPES; i++)
+      InstructionsSpanDistribution.push_back(0);
+    
+    printHeaderStat("ILP distribution");
+    for (i=0; i< DistributionLength; i++) {
+      for(j=0; j< N_INST_TYPES; j++){
+        uint64_t NInstructions = ParallelismDistribution[i][j];
+        if (NInstructions != 0) {
+          InstructionsSpanDistribution[j]++;
+        }
+      }
+    }
+    
+    SpanDistribution = ParallelismDistribution.size();
+    
+    ParallelismDistribution.clear();
+#endif
+    
+    //Reuse Distance Distribution
+    printHeaderStat("Reuse Distance distribution");
+    
+#ifdef NORMAL_REUSE_DISTRIBUTION
+    map <int,int>::iterator ReuseDistanceMapIt;
+    for(ReuseDistanceMapIt= ReuseDistanceDistribution.begin();
+        ReuseDistanceMapIt != ReuseDistanceDistribution.end(); ++ReuseDistanceMapIt){
+      dbgs() << ReuseDistanceMapIt->first << " "<< ReuseDistanceMapIt->second<< "\n";
+    }
+#else
+    map<int,map<uint64_t,uint> >::iterator ReuseDistanceExtendedMapIt;
+    map<uint64_t,uint>::iterator AuxMapIt;
+    for (ReuseDistanceExtendedMapIt = ReuseDistanceDistributionExtended.begin();
+         ReuseDistanceExtendedMapIt != ReuseDistanceDistributionExtended.end();
+         ++ReuseDistanceExtendedMapIt) {
+      dbgs () << ReuseDistanceExtendedMapIt->first << " ";
+      for (AuxMapIt= (ReuseDistanceExtendedMapIt->second).begin();
+           AuxMapIt != (ReuseDistanceExtendedMapIt->second).end();
+           ++AuxMapIt) {sdz
+        dbgs() << AuxMapIt->first << " "<< AuxMapIt->second<< " ";
+      }
+      dbgs () << "\n";
+    }
+#endif
+    dbgs() << "DATA_SET_SIZE\t" << node_size(ReuseTree) << "\n";
+    
+    printHeaderStat("Statistics");
+    
+    unsigned long long InstructionLatency = 0;
+    unsigned IssueCycleGranularity = 1;
+    uint64_t LastCycle =0;
+    
+    //================= Calculate total span ==========================//
+    
+    TmpResourcesVector.clear();
+    
+    for(unsigned j=0; j< nExecutionUnits; j++){
+      
+      if (MergeArithmeticOps) {
+#ifdef INT_FP_OPS
+        if (j==INT_ADDER)
+#else
+          if (j==FP_ADDER)
+#endif
+          {
+            TmpResourcesVector.push_back(j);
+            TmpResourcesVector.push_back(j+1);
+            TmpResourcesVector.push_back(j+2);
+#ifdef INT_FP_OPS
+            TmpResourcesVector.push_back(j+3);
+            TmpResourcesVector.push_back(j+4);
+            TmpResourcesVector.push_back(j+5);
+#endif
+            
+#ifdef INT_FP_OPS
+            // If there are instructions of this type
+            if (InstructionsCountExtended[j]>0 || InstructionsCountExtended[j+1]>0 || InstructionsCountExtended[j+2]>0 || InstructionsCountExtended[j+3]>0 || InstructionsCountExtended[j+4]>0 || InstructionsCountExtended[j+5]>0)
+#else
+              if (InstructionsCountExtended[j]>0 || InstructionsCountExtended[j+1]>0 || InstructionsCountExtended[j+2]>0)
+                
+#endif
+                
+              {
+                TotalSpan = CalculateGroupSpan(TmpResourcesVector);
+              }
+          }else{
+            if (j>FP_DIVIDER) {
               TmpResourcesVector.push_back(j);
               // If there are instructions of this type
               if (InstructionsCountExtended[j]>0) {
-                
                 IssueCycleGranularity = IssueCycleGranularities[j];
-                
                 InstructionLatency  =ExecutionUnitsLatency[j];
-                
-                // LastCycle = GetLastIssueCycle(GetExecutionResource(j), j);
-                //LastCycle = GetLastIssueCycle(j);
                 LastCycle = LastIssueCycleVector[j];
-                TotalSpan = max(LastCycle+InstructionLatency, TotalSpan);
-                
+                TotalSpan = max(LastCycle+InstructionLatency , TotalSpan);
               }
+              
             }
-            
           }
+        
+      }else{
+        TmpResourcesVector.push_back(j);
+        // If there are instructions of this type
+        if (InstructionsCountExtended[j]>0) {
           
+          IssueCycleGranularity = IssueCycleGranularities[j];
           
-          //Calculate Resources-total stall span
+          InstructionLatency  =ExecutionUnitsLatency[j];
           
-          for(unsigned i=0; i< nExecutionUnits; i++){
-            
-            if (!(MergeArithmeticOps && i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER)) {
-              
-              TmpResourcesVector.clear();
-              
-              
-              if (MergeArithmeticOps && i==FP_ADDER) {
-                TmpResourcesVector.push_back(i+1);
-                TmpResourcesVector.push_back(i+2);
-              }
-              
-              for(uint j=RS_STALL; j<= LFB_STALL; j++){
-                if (InstructionsCountExtended[j]!=0) {
-                  TmpResourcesVector.push_back(j);
+          // LastCycle = GetLastIssueCycle(GetExecutionResource(j), j);
+          //LastCycle = GetLastIssueCycle(j);
+          LastCycle = LastIssueCycleVector[j];
+          TotalSpan = max(LastCycle+InstructionLatency, TotalSpan);
+          
+        }
+      }
+      
+    }
+    
+    
+    //Calculate Resources-total stall span
+    
+    for(unsigned i=0; i< nExecutionUnits; i++){
+#ifdef INT_FP_OPS
+      if (!(MergeArithmeticOps && (i==FP_MULTIPLIER || i==INT_MULTIPLIER || i==FP_ADDER)) && !(MergeArithmeticOps && (i==FP_DIVIDER || i==INT_DIVIDER)))
+#else
+        if (!(MergeArithmeticOps && i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER))
+#endif
+        {
+          
+          TmpResourcesVector.clear();
+          
+#ifdef INT_FP_OPS
+          if (MergeArithmeticOps && i==INT_ADDER)
+#else
+            if (MergeArithmeticOps && i==FP_ADDER)
+#endif
+            {
+              TmpResourcesVector.push_back(i+1);
+              TmpResourcesVector.push_back(i+2);
+#ifdef INT_FP_OPS
+              TmpResourcesVector.push_back(i+3);
+              TmpResourcesVector.push_back(i+4);
+              TmpResourcesVector.push_back(i+5);
+#endif
+            }
+          
+          for(uint j=RS_STALL; j<= LFB_STALL; j++){
+            if (InstructionsCountExtended[j]!=0) {
+              TmpResourcesVector.push_back(j);
+            }
+          }
+          TmpResourcesVector.push_back(i);
+          
+          ResourcesTotalStallSpanVector[i]= CalculateGroupSpan(TmpResourcesVector);
+          
+        }
+      
+    }
+    //==================== Print resource statistics =============================//
+    
+    dbgs() << "RESOURCE\tN_OPS_ISSUED\tSPAN\t\tISSUE-SPAN\tSTALL-SPAN\t\tSPAN-GAPS\t\tMAX DAG LEVEL OCCUPANCY\n";
+    
+    for(unsigned j=0; j< nExecutionUnits; j++){
+#ifdef INT_FP_OPS
+      if (!(MergeArithmeticOps &&  (j==FP_MULTIPLIER || j==INT_MULTIPLIER || j==FP_ADDER)) && !(MergeArithmeticOps && (j==FP_DIVIDER || j==INT_DIVIDER)))
+#else
+        if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER))
+#endif
+          
+        {
+          
+          dbgs() << ResourcesNames[j]<< "\t\t"<<InstructionsCountExtended[j]<<"\t\t"<<ResourcesSpan[j]<<"\t\t"<<IssueSpan[j]<<
+          "\t\t"<<ResourcesTotalStallSpanVector[j] <<"\t\t"<< SpanGaps[j]<<"\t\t"<< MaxOccupancy[j] << " \n";
+          
+        }
+    }
+    
+    
+    
+    //==================== Print stall cycles =============================//
+    
+    printHeaderStat("Stall Cycles");
+    
+    dbgs() << "RESOURCE\tN_STALL_CYCLES\t\tAVERAGE_OCCUPANCY\n";
+    
+    for(int j=RS_STALL; j<= LFB_STALL; j++){
+      
+      dbgs() << ResourcesNames[j]<< "\t\t" << ResourcesSpan[j] << "\t\t" << BuffersOccupancy[j-RS_STALL]/TotalSpan<<"\n";
+      
+    }
+    
+    printHeaderStat("Span Only Stalls");
+    TmpResourcesVector.clear();
+    for (unsigned i = RS_STALL; i<=LFB_STALL; i++) {
+      if (InstructionsCountExtended[i]> 0) {
+        // This TotalStallSpan is just in case there are only stalls from one buffer
+        TotalStallSpan =  ResourcesSpan[i];
+        TmpResourcesVector.push_back(i);
+      }
+    }
+    if (TmpResourcesVector.empty()==true) {
+      TotalStallSpan = 0;
+    }else{
+      if (TmpResourcesVector.size()!=1) {
+        TotalStallSpan = CalculateGroupSpan(TmpResourcesVector);
+      }
+    }
+    
+    dbgs() << TotalStallSpan << "\n";
+    
+    
+    
+    //==================== Print port Occupancy =============================//
+    
+    printHeaderStat("Port occupancy");
+    
+    dbgs() << "PORT\t\tDISPATCH CYCLES\n";
+    
+    for(int j=PORT_0; j<= PORT_4; j++){
+      TmpResourcesVector.clear();
+      TmpResourcesVector.push_back(j);
+      dbgs() << ResourcesNames[j]<< "\t\t" << CalculateGroupSpan(TmpResourcesVector) << "\n";
+    }
+    
+    if (!ReportOnlyPerformance) {
+      
+      //==================== Resource-Stall Span =============================//
+      
+      printHeaderStat("Resource-Stall Span");
+      dbgs() << "RESOURCE";
+      for(int j=RS_STALL; j<= LFB_STALL; j++){
+        dbgs() << "\t"<<ResourcesNames[j];
+      }
+      dbgs() << "\n";
+      
+      for(unsigned i=0; i< nExecutionUnits; i++){
+#ifdef INT_FP_OPS
+        if (!(MergeArithmeticOps &&  (i==FP_MULTIPLIER || i==FP_ADDER || i==INT_MULTIPLIER)) && !(MergeArithmeticOps && (i==FP_DIVIDER || i==INT_DIVIDER)))
+#else
+          if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER))
+#endif
+          {
+            dbgs() << ResourcesNames[i]<< "\t\t";
+            for(uint j=RS_STALL; j<=LFB_STALL; j++){
+              if (InstructionsCountExtended[i]!= 0 && InstructionsCountExtended[j]!= 0 ) {
+                TmpResourcesVector.clear();
+                TmpResourcesVector.push_back(i);
+#ifdef INT_FP_OPS
+                if (MergeArithmeticOps &&  i==INT_ADDER) {
+                  TmpResourcesVector.push_back(i+1);
+                  TmpResourcesVector.push_back(i+2);
+                  TmpResourcesVector.push_back(i+3);
+                  TmpResourcesVector.push_back(i+4);
+                  TmpResourcesVector.push_back(i+5);
+                }
+#else
+                if (MergeArithmeticOps &&  i==FP_ADDER) {
+                  TmpResourcesVector.push_back(i+1);
+                  TmpResourcesVector.push_back(i+2);
+                }
+#endif
+                
+                TmpResourcesVector.push_back(j);
+                
+                PairSpan = CalculateGroupSpan(TmpResourcesVector);
+                
+              }else{
+                if (InstructionsCountExtended[i]==0) {
+                  PairSpan = InstructionsCountExtended[j];
+                }else{
+                  if (InstructionsCountExtended[j]== 0 ) {
+                    PairSpan = ResourcesSpan[i];
+                    
+                  }
                 }
               }
-              TmpResourcesVector.push_back(i);
-              
-              ResourcesTotalStallSpanVector[i]= CalculateGroupSpan(TmpResourcesVector);
-              
-            }
-            
-          }
-          //==================== Print resource statistics =============================//
-          
-          dbgs() << "RESOURCE\tN_OPS_ISSUED\tSPAN\t\tISSUE-SPAN\tSTALL-SPAN\t\tSPAN-GAPS\t\tMAX DAG LEVEL OCCUPANCY\n";
-          
-          for(unsigned j=0; j< nExecutionUnits; j++){
-            if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER)){
-              
-              dbgs() << ResourcesNames[j]<< "\t\t"<<InstructionsCountExtended[j]<<"\t\t"<<ResourcesSpan[j]<<"\t\t"<<IssueSpan[j]<<
-              "\t\t"<<ResourcesTotalStallSpanVector[j] <<"\t\t"<< SpanGaps[j]<<"\t\t"<< MaxOccupancy[j] << " \n";
-              
-            }
-          }
-          
-          
-          
-          //==================== Print stall cycles =============================//
-          
-          printHeaderStat("Stall Cycles");
-          
-          dbgs() << "RESOURCE\tN_STALL_CYCLES\t\tAVERAGE_OCCUPANCY\n";
-          
-          for(int j=RS_STALL; j<= LFB_STALL; j++){
-            
-            dbgs() << ResourcesNames[j]<< "\t\t" << ResourcesSpan[j] << "\t\t" << BuffersOccupancy[j-RS_STALL]/TotalSpan<<"\n";
-            
-          }
-          
-          printHeaderStat("Span Only Stalls");
-          TmpResourcesVector.clear();
-          for (unsigned i = RS_STALL; i<=LFB_STALL; i++) {
-            if (InstructionsCountExtended[i]> 0) {
-              TmpResourcesVector.push_back(i);
-            }
-          }
-          if (TmpResourcesVector.empty() == false) {
-            TotalStallSpan = CalculateGroupSpan(TmpResourcesVector);
-          }else{
-            TotalStallSpan = 0;
-          }
-          dbgs() << TotalStallSpan << "\n";
-          
-          
-          
-          //==================== Print port Occupancy =============================//
-          
-          printHeaderStat("Port occupancy");
-          
-          dbgs() << "PORT\t\tDISPATCH CYCLES\n";
-          
-          for(int j=PORT_0; j<= PORT_4; j++){
-            TmpResourcesVector.clear();
-            TmpResourcesVector.push_back(j);
-            dbgs() << ResourcesNames[j]<< "\t\t" << CalculateGroupSpan(TmpResourcesVector) << "\n";
-          }
-          
-          if (!ReportOnlyPerformance) {
-            
-            //==================== Resource-Stall Span =============================//
-            
-            printHeaderStat("Resource-Stall Span");
-            dbgs() << "RESOURCE";
-            for(int j=RS_STALL; j<= LFB_STALL; j++){
-              dbgs() << "\t"<<ResourcesNames[j];
+              dbgs() << PairSpan << "\t";
+              ResourcesStallSpanVector[i][j-RS_STALL] = PairSpan; // Store the Span value
             }
             dbgs() << "\n";
+          }
+      }
+      
+      //==================== Resource-Stall Overlap =============================//
+      
+      printHeaderStat("Resource-Stall Overlap (0-1)");
+      dbgs() << "RESOURCE";
+      for(unsigned j=RS_STALL; j<= LFB_STALL; j++){
+        dbgs() << "\t"<<ResourcesNames[j];
+      }
+      dbgs() << "\n";
+      
+      float OverlapPercetage;
+      for(unsigned i=0; i< nExecutionUnits; i++){
+#ifdef INT_FP_OPS
+        if (!(MergeArithmeticOps &&  (i==FP_MULTIPLIER || i==FP_ADDER || i==INT_MULTIPLIER)) && !(MergeArithmeticOps && (i==FP_DIVIDER || i==INT_DIVIDER)))
+#else
+          if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER))
+#endif
+          {
+            dbgs() << ResourcesNames[i]<< "\t\t";
+            for(uint j=RS_STALL; j <= LFB_STALL; j++){
+              if (InstructionsCountExtended[i]!=0 && InstructionsCountExtended[j]!=0 && ResourcesSpan[i]!= 0 && ResourcesSpan[j]!= 0){
+                Total = ResourcesStallSpanVector[i][j-RS_STALL];
+                // When latency is zero, ResourcesSpan is zero. However, IssueSpan
+                // might not be zero.
+                /*
+                 if (ResourcesSpan[i]== 0) {
+                 T1 = max(ResourcesTotalStallSpanVector[i], IssueSpan[i]);
+                 }else
+                 T1 = ResourcesSpan[i];
+                 if (ResourcesSpan[j]==0) {
+                 T2 = max(ResourcesTotalStallSpanVector[j], IssueSpan[j]);
+                 }else
+                 T2 = ResourcesSpan[j];
+                 */
+                T1 = ResourcesSpan[i];
+                T2 = ResourcesSpan[j];
+                assert(Total <= T1+T2);
+                OverlapCycles =  T1+T2-Total;
+                OverlapPercetage = (float)OverlapCycles/(float(min(T1, T2)));
+                if (OverlapPercetage > 1.0) {
+                  report_fatal_error("Overlap > 1.0");
+                }
+              }else{
+                OverlapPercetage = 0;
+              }
+              fprintf(stderr, " %1.3f ", OverlapPercetage);
+            }
+            dbgs() << "\n";
+          }
+      }
+      
+      //==================== ResourceIssue-Stall Span =============================//
+      
+      printHeaderStat("ResourceIssue-Stall Span");
+      dbgs() << "RESOURCE";
+      for(unsigned j=RS_STALL; j<= LFB_STALL; j++){
+        dbgs() << "\t"<<ResourcesNames[j];
+      }
+      dbgs() << "\n";
+      
+      for(unsigned i=0; i< nExecutionUnits; i++){
+#ifdef INT_FP_OPS
+        if (!(MergeArithmeticOps &&  (i==FP_MULTIPLIER || i==FP_ADDER || i==INT_MULTIPLIER)) && !(MergeArithmeticOps && (i==FP_DIVIDER || i==INT_DIVIDER)))
+#else
+          if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER))
+#endif
+          {
+            dbgs() << ResourcesNames[i]<< "\t\t";
             
-            for(unsigned i=0; i< nExecutionUnits; i++){
-              if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER)){
-                dbgs() << ResourcesNames[i]<< "\t\t";
-                for(uint j=RS_STALL; j<=LFB_STALL; j++){
-                  if (InstructionsCountExtended[i]!= 0 && InstructionsCountExtended[j]!= 0 ) {
-                    TmpResourcesVector.clear();
+            for(uint j=RS_STALL; j<=LFB_STALL; j++){
+              if (InstructionsCountExtended[i]!= 0 && InstructionsCountExtended[j]!= 0 ) {
+                TmpResourcesVector.clear();
+                TmpResourcesVector.push_back(i);
+#ifdef INT_FP_OPS
+                if ( MergeArithmeticOps &&  i==INT_ADD_NODE) {
+                  TmpResourcesVector.push_back(i+1);
+                  TmpResourcesVector.push_back(i+2);
+                  TmpResourcesVector.push_back(i+3);
+                  TmpResourcesVector.push_back(i+4);
+                  TmpResourcesVector.push_back(i+5);
+                }
+#else
+                if ( MergeArithmeticOps &&  i==FP_ADD_NODE) {
+                  TmpResourcesVector.push_back(i+1);
+                  TmpResourcesVector.push_back(i+2);
+                }
+#endif
+                TmpResourcesVector.push_back(j);
+                PairSpan = CalculateIssueSpan(TmpResourcesVector);
+                //PairSpan = CalculateGroupSpanUnitLatency(TmpResourcesVector);
+                ResourcesIssueStallSpanVector[i][j-RS_STALL] = PairSpan;
+                
+                
+                // #ifdef ASSERT
+                //if (!MergeArithmeticOps) {
+                //assert(PairSpan == CalculateGroupSpan(TmpResourcesVector,false, true));
+                // }
+                
+                // #endif
+                
+              }else{
+                if (InstructionsCountExtended[i]==0) {
+                  PairSpan = InstructionsCountExtended[j];
+                  ResourcesIssueStallSpanVector[i][j-RS_STALL] = PairSpan;
+                }else{
+                  if (InstructionsCountExtended[j]== 0 ) {
+                    PairSpan = IssueSpan[i];
+                    ResourcesIssueStallSpanVector[i][j-RS_STALL] = PairSpan;
+                    
+                  }
+                }
+              }
+              dbgs() << PairSpan << "\t";
+            }
+            dbgs() << "\n";
+          }
+      }
+      
+      //==================== ResourceIssue-Stall Overlap =============================//
+      
+      printHeaderStat("ResourceIssue-Stall Overlap (0-1)");
+      dbgs() << "RESOURCE";
+      for(unsigned j=RS_STALL; j<= LFB_STALL; j++){
+        dbgs() << "\t"<<ResourcesNames[j];
+      }
+      dbgs() << "\n";
+      float OverlapPercentage;
+      
+      for(unsigned i=0; i< nExecutionUnits; i++){
+#ifdef INT_FP_OPS
+        if (!(MergeArithmeticOps &&  (i==FP_MULTIPLIER || i==FP_ADDER || i==INT_MULTIPLIER)) && !(MergeArithmeticOps && (i==FP_DIVIDER || i==INT_DIVIDER)))
+#else
+          if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER))
+#endif
+          {
+            dbgs() << ResourcesNames[i]<< "\t\t";
+            for(uint j=RS_STALL; j <= LFB_STALL; j++){
+              if (InstructionsCountExtended[i]!=0 && InstructionsCountExtended[j]!=0){
+                Total = ResourcesIssueStallSpanVector[i][j-RS_STALL];
+                T1 = IssueSpan[i];
+                T2 = InstructionsCountExtended[j];
+                assert(Total <= T1+T2);
+                OverlapCycles =  T1+T2-Total;
+                OverlapPercentage = (float)OverlapCycles/(float(min(T1, T2)));
+                if (OverlapPercentage > 1.0) {
+                  report_fatal_error("Overlap > 1.0");
+                }
+              }else{
+                OverlapPercentage = 0;
+              }
+              fprintf(stderr, " %1.3f ", OverlapPercentage);
+            }
+            dbgs() << "\n";
+          }
+      }
+      
+      //==================== Resource-Resource Span =============================//
+      
+      printHeaderStat("Resource-Resource Span (resources span without stalls)");
+      
+      dbgs() << "RESOURCE";
+      for(unsigned j=0; j< nExecutionUnits; j++){
+#ifdef INT_FP_OPS
+        if (!(MergeArithmeticOps &&  (j==FP_MULTIPLIER || j==INT_MULTIPLIER || j==FP_ADDER)) && !(MergeArithmeticOps && (j==FP_DIVIDER || j==INT_DIVIDER)))
+#else
+          if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER))
+#endif
+          {
+            dbgs() << "\t"<<ResourcesNames[j];
+          }
+      }
+      dbgs() << "\n";
+      
+      for(unsigned j=0; j< nExecutionUnits; j++){
+#ifdef INT_FP_OPS
+        if (!(MergeArithmeticOps &&  (j==FP_MULTIPLIER || j==INT_MULTIPLIER || j==FP_ADDER)) && !(MergeArithmeticOps && (j==FP_DIVIDER || j==INT_DIVIDER)))
+#else
+          if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER))
+#endif
+          {
+            dbgs() << ResourcesNames[j]<< "\t\t";
+            for(unsigned i=0; i< j; i++){
+              TmpResourcesVector.clear();
+#ifdef INT_FP_OPS
+              if (!(MergeArithmeticOps &&  (i==FP_MULTIPLIER || i==INT_MULTIPLIER || i==FP_ADDER)) && !(MergeArithmeticOps && (i==FP_DIVIDER || i==INT_DIVIDER)))
+#else
+                if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER))
+#endif
+                {
+                  
+                  if (InstructionsCountExtended[i]!= 0 && InstructionsCountExtended[j]!=0) {
                     TmpResourcesVector.push_back(i);
-                    if (MergeArithmeticOps &&  i==FP_ADDER) {
+#ifdef INT_FP_OPS
+                    if(MergeArithmeticOps &&  i == INT_ADDER){
+                      TmpResourcesVector.push_back(i+1);
+                      TmpResourcesVector.push_back(i+2);
+                      TmpResourcesVector.push_back(i+3);
+                      TmpResourcesVector.push_back(i+4);
+                      TmpResourcesVector.push_back(i+5);
+                    }
+#else
+                    
+                    if(MergeArithmeticOps &&  i == FP_ADDER){
                       TmpResourcesVector.push_back(i+1);
                       TmpResourcesVector.push_back(i+2);
                     }
-                    
+#endif
                     TmpResourcesVector.push_back(j);
-                    
                     PairSpan = CalculateGroupSpan(TmpResourcesVector);
                     
                   }else{
-                    if (InstructionsCountExtended[i]==0) {
-                      PairSpan = InstructionsCountExtended[j];
+                    if(InstructionsCountExtended[i]==0){
+                      PairSpan = ResourcesSpan[j];
+                      
                     }else{
-                      if (InstructionsCountExtended[j]== 0 ) {
+                      if(InstructionsCountExtended[j]==0){
                         PairSpan = ResourcesSpan[i];
+                      }
+                    }
+                  }
+                  
+                  dbgs() << PairSpan << "\t";
+                  
+                  ResourcesResourcesNoStallSpanVector[j][i] = PairSpan;
+                  
+                }
+            }
+            dbgs() << "\n";
+          }
+      }
+      
+      printHeaderStat("Resource-Resource Overlap Percentage (resources span without stall)");
+      
+      dbgs() << "RESOURCE";
+      for(unsigned j=0; j< nExecutionUnits; j++){
+#ifdef INT_FP_OPS
+        if (!(MergeArithmeticOps &&  (j==FP_MULTIPLIER || j==FP_ADDER || j==INT_MULTIPLIER)) && !(MergeArithmeticOps && (j==FP_DIVIDER || j==INT_DIVIDER)))
+#else
+          if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER))
+#endif
+          {
+            dbgs() << "\t"<<ResourcesNames[j];
+          }
+      }
+      dbgs() << "\n";
+      
+      for(unsigned j=0; j< nExecutionUnits; j++){
+#ifdef INT_FP_OPS
+        if (!(MergeArithmeticOps &&  (j==FP_MULTIPLIER || j==FP_ADDER || j==INT_MULTIPLIER)) && !(MergeArithmeticOps && (j==FP_DIVIDER || j==INT_DIVIDER)))
+#else
+          if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER))
+#endif
+            
+          {
+            dbgs() << ResourcesNames[j]<< "\t\t";
+            for(unsigned i=0; i< j; i++){
+#ifdef INT_FP_OPS
+              if (!(MergeArithmeticOps &&  (i==FP_MULTIPLIER || i==FP_ADDER || i==INT_MULTIPLIER)) && !(MergeArithmeticOps && (i==FP_DIVIDER || i==INT_DIVIDER)))
+#else
+                if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER))
+#endif
+                  
+                {
+                  if (InstructionsCountExtended[i]!= 0 && InstructionsCountExtended[j]!=0 && ResourcesSpan[i]!= 0 && ResourcesSpan[j]!= 0) {
+                    Total = ResourcesResourcesNoStallSpanVector[j][i];
+                    /*if (ResourcesSpan[i]== 0) {
+                     T1 = max(ResourcesTotalStallSpanVector[i], IssueSpan[i]);
+                     }else
+                     T1 = ResourcesSpan[i];
+                     if (ResourcesSpan[j]==0) {
+                     T2 = max(ResourcesTotalStallSpanVector[j], IssueSpan[j]);
+                     }else
+                     T2 = ResourcesSpan[j];
+                     */
+                    T1 = ResourcesSpan[j];
+                    T2 = ResourcesSpan[i];
+                    assert(Total <= T1+T2);
+                    OverlapCycles =  T1+T2-Total;
+                    
+                    OverlapPercetage = (float)OverlapCycles/(float(min(T1, T2)));
+                    if (OverlapPercetage > 1.0) {
+                      report_fatal_error("Overlap > 1.0");
+                    }
+                  }else{
+                    OverlapPercetage = 0;
+                  }
+                  fprintf(stderr, " %1.3f ", OverlapPercetage);
+                  
+                }
+            }
+            dbgs() << "\n";
+          }
+      }
+      
+      printHeaderStat("Resource-Resource Span (resources span with stalls)");
+      
+      vector<int> StallsVector;
+      
+      dbgs() << "RESOURCE";
+      for(unsigned j=0; j< nExecutionUnits; j++){
+#ifdef INT_FP_OPS
+        if (!(MergeArithmeticOps &&  (j==FP_MULTIPLIER || j==FP_ADDER || j==INT_MULTIPLIER)) && !(MergeArithmeticOps && (j==FP_DIVIDER || j==INT_DIVIDER)))
+#else
+          if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER))
+#endif
+          {
+            dbgs() << "\t"<<ResourcesNames[j];
+          }
+      }
+      dbgs() << "\n";
+      
+      for(unsigned j=0; j< nExecutionUnits; j++){
+#ifdef INT_FP_OPS
+        if (!(MergeArithmeticOps &&  (j==FP_MULTIPLIER || j==FP_ADDER || j==INT_MULTIPLIER)) && !(MergeArithmeticOps && (j==FP_DIVIDER || j==INT_DIVIDER)))
+#else
+          if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER))
+#endif
+          {
+            dbgs() << ResourcesNames[j]<< "\t\t";
+            for(unsigned i=0; i< j; i++){
+              TmpResourcesVector.clear();
+              for (unsigned k = RS_STALL; k <= LFB_STALL; k++) {
+                TmpResourcesVector.push_back(k);
+              }
+#ifdef INT_FP_OPS
+              if (!(MergeArithmeticOps &&  (i==FP_MULTIPLIER || i==FP_ADDER || i==INT_MULTIPLIER)) && !(MergeArithmeticOps && (i==FP_DIVIDER || i==INT_DIVIDER)))
+#else
+                if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER))
+#endif
+                {
+                  
+                  if (InstructionsCountExtended[i]!= 0 && InstructionsCountExtended[j]!=0) {
+                    
+                    TmpResourcesVector.push_back(i);
+#ifdef INT_FP_OPS
+                    if(MergeArithmeticOps &&  i == INT_ADDER){
+                      TmpResourcesVector.push_back(i+1);
+                      TmpResourcesVector.push_back(i+2);
+                      TmpResourcesVector.push_back(i+3);
+                      TmpResourcesVector.push_back(i+4);
+                      TmpResourcesVector.push_back(i+5);
+                    }
+#else
+                    if(MergeArithmeticOps &&  i == FP_ADDER){
+                      TmpResourcesVector.push_back(i+1);
+                      TmpResourcesVector.push_back(i+2);
+                    }
+#endif
+                    
+                    TmpResourcesVector.push_back(j);
+                    PairSpan = CalculateGroupSpan(TmpResourcesVector);
+                    
+                  }else{
+                    if(InstructionsCountExtended[i]==0){
+                      PairSpan = TotalStallSpan;
+                      
+                    }else{
+                      if(InstructionsCountExtended[j]==0){
+                        PairSpan = ResourcesTotalStallSpanVector[i];
                         
                       }
                     }
                   }
+                  
                   dbgs() << PairSpan << "\t";
-                  ResourcesStallSpanVector[i][j-RS_STALL] = PairSpan; // Store the Span value
+                  ResourcesResourcesSpanVector[j][i] = PairSpan;
                 }
-                dbgs() << "\n";
-              }
-            }
-            
-            //==================== Resource-Stall Overlap =============================//
-            
-            printHeaderStat("Resource-Stall Overlap (0-1)");
-            dbgs() << "RESOURCE";
-            for(unsigned j=RS_STALL; j<= LFB_STALL; j++){
-              dbgs() << "\t"<<ResourcesNames[j];
             }
             dbgs() << "\n";
+          }
+      }
+      
+      printHeaderStat("Resource-Resource Overlap Percentage (resources span with stall)");
+      
+      dbgs() << "RESOURCE";
+      for(unsigned j=0; j< nExecutionUnits; j++){
+#ifdef INT_FP_OPS
+        if (!(MergeArithmeticOps &&  (j==FP_MULTIPLIER || j==FP_ADDER || j==INT_MULTIPLIER)) && !(MergeArithmeticOps && (j==FP_DIVIDER || j==INT_DIVIDER)))
+#else
+          if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER))
+#endif
             
-            float OverlapPercetage;
-            for(unsigned i=0; i< nExecutionUnits; i++){
-              if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER)){
-                dbgs() << ResourcesNames[i]<< "\t\t";
-                for(uint j=RS_STALL; j <= LFB_STALL; j++){
-                  if (InstructionsCountExtended[i]!=0 && InstructionsCountExtended[j]!=0){
-                    Total = ResourcesStallSpanVector[i][j-RS_STALL];
-                    T1 = ResourcesSpan[i];
-                    T2 = ResourcesSpan[j];
+          {
+            dbgs() << "\t"<<ResourcesNames[j];
+          }
+      }
+      dbgs() << "\n";
+      
+      for(unsigned j=0; j< nExecutionUnits; j++){
+#ifdef INT_FP_OPS
+        if (!(MergeArithmeticOps &&  (j==FP_MULTIPLIER || j==FP_ADDER || j==INT_MULTIPLIER)) && !(MergeArithmeticOps && (j==FP_DIVIDER || j==INT_DIVIDER)))
+#else
+          if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER))
+#endif
+          {
+            dbgs() << ResourcesNames[j]<< "\t\t";
+            for(unsigned i=0; i< j; i++){
+#ifdef INT_FP_OPS
+              if (!(MergeArithmeticOps &&  (i==FP_MULTIPLIER || i==FP_ADDER || i==INT_MULTIPLIER)) && !(MergeArithmeticOps && (i==FP_DIVIDER || i==INT_DIVIDER)))
+#else
+                if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER))
+#endif
+                {
+                  if (InstructionsCountExtended[i]!= 0 && InstructionsCountExtended[j]!=0 && ResourcesTotalStallSpanVector[j] != 0 && ResourcesTotalStallSpanVector[i]!= 0) {
+                    Total = ResourcesResourcesSpanVector[j][i];
+                    T1 = ResourcesTotalStallSpanVector[j];
+                    T2 = ResourcesTotalStallSpanVector[i];
+                    
+                    
                     assert(Total <= T1+T2);
                     OverlapCycles =  T1+T2-Total;
                     OverlapPercetage = (float)OverlapCycles/(float(min(T1, T2)));
@@ -5170,409 +6340,161 @@ DynamicAnalysis::finishAnalysis(){
                     OverlapPercetage = 0;
                   }
                   fprintf(stderr, " %1.3f ", OverlapPercetage);
-                }
-                dbgs() << "\n";
-              }
-            }
-            
-            //==================== ResourceIssue-Stall Span =============================//
-            
-            printHeaderStat("ResourceIssue-Stall Span");
-            dbgs() << "RESOURCE";
-            for(unsigned j=RS_STALL; j<= LFB_STALL; j++){
-              dbgs() << "\t"<<ResourcesNames[j];
-            }
-            dbgs() << "\n";
-            
-            for(unsigned i=0; i< nExecutionUnits; i++){
-              if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER)){
-                dbgs() << ResourcesNames[i]<< "\t\t";
-                
-                for(uint j=RS_STALL; j<=LFB_STALL; j++){
-                  if (InstructionsCountExtended[i]!= 0 && InstructionsCountExtended[j]!= 0 ) {
-                    TmpResourcesVector.clear();
-                    TmpResourcesVector.push_back(i);
-                    if ( MergeArithmeticOps &&  i==FP_ADD_NODE) {
-                      TmpResourcesVector.push_back(i+1);
-                      TmpResourcesVector.push_back(i+2);
-                    }
-                    TmpResourcesVector.push_back(j);
-                    PairSpan = CalculateIssueSpan(TmpResourcesVector);
-                    //PairSpan = CalculateGroupSpanUnitLatency(TmpResourcesVector);
-                    ResourcesIssueStallSpanVector[i][j-RS_STALL] = PairSpan;
-                    
-                    
-                    // #ifdef ASSERT
-                    //if (!MergeArithmeticOps) {
-                    //assert(PairSpan == CalculateGroupSpan(TmpResourcesVector,false, true));
-                    // }
-                    
-                    // #endif
-                    
-                  }else{
-                    if (InstructionsCountExtended[i]==0) {
-                      PairSpan = InstructionsCountExtended[j];
-                      ResourcesIssueStallSpanVector[i][j-RS_STALL] = PairSpan;
-                    }else{
-                      if (InstructionsCountExtended[j]== 0 ) {
-                        PairSpan = IssueSpan[i];
-                        ResourcesIssueStallSpanVector[i][j-RS_STALL] = PairSpan;
-                        
-                      }
-                    }
-                  }
-                  dbgs() << PairSpan << "\t";
-                }
-                dbgs() << "\n";
-              }
-            }
-            
-            //==================== ResourceIssue-Stall Overlap =============================//
-            
-            printHeaderStat("ResourceIssue-Stall Overlap (0-1)");
-            dbgs() << "RESOURCE";
-            for(unsigned j=RS_STALL; j<= LFB_STALL; j++){
-              dbgs() << "\t"<<ResourcesNames[j];
-            }
-            dbgs() << "\n";
-            float OverlapPercentage;
-            
-            for(unsigned i=0; i< nExecutionUnits; i++){
-              if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER)){
-                dbgs() << ResourcesNames[i]<< "\t\t";
-                for(uint j=RS_STALL; j <= LFB_STALL; j++){
-                  if (InstructionsCountExtended[i]!=0 && InstructionsCountExtended[j]!=0){
-                    Total = ResourcesIssueStallSpanVector[i][j-RS_STALL];
-                    T1 = IssueSpan[i];
-                    T2 = InstructionsCountExtended[j];
-                    assert(Total <= T1+T2);
-                    OverlapCycles =  T1+T2-Total;
-                    OverlapPercentage = (float)OverlapCycles/(float(min(T1, T2)));
-                    if (OverlapPercentage > 1.0) {
-                      report_fatal_error("Overlap > 1.0");
-                    }
-                  }else{
-                    OverlapPercentage = 0;
-                  }
-                  fprintf(stderr, " %1.3f ", OverlapPercentage);
-                }
-                dbgs() << "\n";
-              }
-            }
-            
-            //==================== Resource-Resource Span =============================//
-            
-            printHeaderStat("Resource-Resource Span (resources span without stalls)");
-            
-            dbgs() << "RESOURCE";
-            for(unsigned j=0; j< nExecutionUnits; j++){
-              if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER)){
-                dbgs() << "\t"<<ResourcesNames[j];
-              }
-            }
-            dbgs() << "\n";
-            
-            for(unsigned j=0; j< nExecutionUnits; j++){
-              if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER)){
-                dbgs() << ResourcesNames[j]<< "\t\t";
-                for(unsigned i=0; i< j; i++){
-                  TmpResourcesVector.clear();
-                  
-                  if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER)){
-                    
-                    if (InstructionsCountExtended[i]!= 0 && InstructionsCountExtended[j]!=0) {
-                      TmpResourcesVector.push_back(i);
-                      if(MergeArithmeticOps &&  i == FP_ADDER){
-                        TmpResourcesVector.push_back(i+1);
-                        TmpResourcesVector.push_back(i+2);
-                      }
-                      TmpResourcesVector.push_back(j);
-                      PairSpan = CalculateGroupSpan(TmpResourcesVector);
-                      
-                    }else{
-                      if(InstructionsCountExtended[i]==0){
-                        PairSpan = ResourcesSpan[j];
-                        
-                      }else{
-                        if(InstructionsCountExtended[j]==0){
-                          PairSpan = ResourcesSpan[i];
-                        }
-                      }
-                    }
-                    
-                    dbgs() << PairSpan << "\t";
-                    
-                    ResourcesResourcesNoStallSpanVector[j][i] = PairSpan;
-                    
-                  }
-                }
-                dbgs() << "\n";
-              }
-            }
-            
-            printHeaderStat("Resource-Resource Overlap Percentage (resources span without stall)");
-            
-            dbgs() << "RESOURCE";
-            for(unsigned j=0; j< nExecutionUnits; j++){
-              if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER)){
-                dbgs() << "\t"<<ResourcesNames[j];
-              }
-            }
-            dbgs() << "\n";
-            
-            for(unsigned j=0; j< nExecutionUnits; j++){
-              if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER)){
-                dbgs() << ResourcesNames[j]<< "\t\t";
-                for(unsigned i=0; i< j; i++){
-                  if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER)){
-                    if (InstructionsCountExtended[i]!= 0 && InstructionsCountExtended[j]!=0) {
-                      Total = ResourcesResourcesNoStallSpanVector[j][i];
-                      T1 = ResourcesSpan[j];
-                      T2 = ResourcesSpan[i];
-                      assert(Total <= T1+T2);
-                      OverlapCycles =  T1+T2-Total;
-                      OverlapPercetage = (float)OverlapCycles/(float(min(T1, T2)));
-                      if (OverlapPercetage > 1.0) {
-                        report_fatal_error("Overlap > 1.0");
-                      }
-                    }else{
-                      OverlapPercetage = 0;
-                    }
-                    fprintf(stderr, " %1.3f ", OverlapPercetage);
-                    
-                  }
-                }
-                dbgs() << "\n";
-              }
-            }
-            
-            printHeaderStat("Resource-Resource Span (resources span with stalls)");
-            
-            vector<int> StallsVector;
-            
-            dbgs() << "RESOURCE";
-            for(unsigned j=0; j< nExecutionUnits; j++){
-              if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER)){
-                dbgs() << "\t"<<ResourcesNames[j];
-              }
-            }
-            dbgs() << "\n";
-            
-            for(unsigned j=0; j< nExecutionUnits; j++){
-              if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER)){
-                dbgs() << ResourcesNames[j]<< "\t\t";
-                for(unsigned i=0; i< j; i++){
-                  TmpResourcesVector.clear();
-                  for (unsigned k = RS_STALL; k <= LFB_STALL; k++) {
-                    TmpResourcesVector.push_back(k);
-                  }
-                  
-                  if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER)){
-                    
-                    if (InstructionsCountExtended[i]!= 0 && InstructionsCountExtended[j]!=0) {
-                      
-                      TmpResourcesVector.push_back(i);
-                      if(MergeArithmeticOps &&  i == FP_ADDER){
-                        TmpResourcesVector.push_back(i+1);
-                        TmpResourcesVector.push_back(i+2);
-                      }
-                      
-                      TmpResourcesVector.push_back(j);
-                      PairSpan = CalculateGroupSpan(TmpResourcesVector);
-                      
-                    }else{
-                      if(InstructionsCountExtended[i]==0){
-                        PairSpan = TotalStallSpan;
-                        
-                      }else{
-                        if(InstructionsCountExtended[j]==0){
-                          PairSpan = ResourcesTotalStallSpanVector[i];
-                          
-                        }
-                      }
-                    }
-                    
-                    dbgs() << PairSpan << "\t";
-                    ResourcesResourcesSpanVector[j][i] = PairSpan;
-                  }
-                }
-                dbgs() << "\n";
-              }
-            }
-            
-            printHeaderStat("Resource-Resource Overlap Percentage (resources span with stall)");
-            
-            dbgs() << "RESOURCE";
-            for(unsigned j=0; j< nExecutionUnits; j++){
-              if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER))
-                dbgs() << "\t"<<ResourcesNames[j];
-            }
-            dbgs() << "\n";
-            
-            for(unsigned j=0; j< nExecutionUnits; j++){
-              if (!(MergeArithmeticOps &&  j==FP_MULTIPLIER) && !(MergeArithmeticOps && j==FP_DIVIDER)){
-                dbgs() << ResourcesNames[j]<< "\t\t";
-                for(unsigned i=0; i< j; i++){
-                  if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER)){
-                    if (InstructionsCountExtended[i]!= 0 && InstructionsCountExtended[j]!=0) {
-                      Total = ResourcesResourcesSpanVector[j][i];
-                      T1 = ResourcesTotalStallSpanVector[j];
-                      T2 = ResourcesTotalStallSpanVector[i];
-                      
-                      
-                      assert(Total <= T1+T2);
-                      OverlapCycles =  T1+T2-Total;
-                      OverlapPercetage = (float)OverlapCycles/(float(min(T1, T2)));
-                      if (OverlapPercetage > 1.0) {
-                        report_fatal_error("Overlap > 1.0");
-                      }
-                    }else{
-                      OverlapPercetage = 0;
-                    }
-                    fprintf(stderr, " %1.3f ", OverlapPercetage);
-                    
-                  }
-                }
-                dbgs() << "\n";
-              }
-            }
-            
-            printHeaderStat("Stall-Stall Span");
-            
-            dbgs() << "RESOURCE";
-            for(unsigned j=RS_STALL; j<=LFB_STALL; j++){
-              dbgs() << "\t"<<ResourcesNames[j];
-            }
-            dbgs() << "\n";
-            
-            for(unsigned j=RS_STALL; j<= LFB_STALL; j++){
-              dbgs() << ResourcesNames[j]<< "\t\t";
-              for(unsigned i=RS_STALL; i< j; i++){
-                if (InstructionsCountExtended[j]!= 0 && InstructionsCountExtended[i]!=0) {
-                  
-                  TmpResourcesVector.clear();
-                  TmpResourcesVector.push_back(j);
-                  TmpResourcesVector.push_back(i);
-                  PairSpan = CalculateGroupSpan(TmpResourcesVector);
-                  
-                }else{
-                  if(InstructionsCountExtended[i]==0){
-                    PairSpan = ResourcesSpan[j];
-                  }else{
-                    if(InstructionsCountExtended[j]==0){
-                      PairSpan = ResourcesSpan[i];
-                    }
-                  }
-                }
-                
-                dbgs() << PairSpan << "\t";
-                StallStallSpanVector[j-RS_STALL][i-RS_STALL] = PairSpan;
-              }
-              dbgs() << "\n";
-            }
-            
-            printHeaderStat("Stall-Stall Overlap Percentage ");
-            
-            dbgs() << "RESOURCE";
-            for(unsigned j=RS_STALL; j <= LFB_STALL; j++){
-              dbgs() << "\t"<<ResourcesNames[j];
-            }
-            dbgs() << "\n";
-            
-            for(unsigned j=RS_STALL; j<= LFB_STALL; j++){
-              dbgs() << ResourcesNames[j]<< "\t\t";
-              for(unsigned i=RS_STALL; i< j; i++){
-                if (InstructionsCountExtended[j]!= 0 && InstructionsCountExtended[i]!=0) {
-                  Total = StallStallSpanVector[j-RS_STALL][i-RS_STALL];
-                  T1 = ResourcesSpan[j];
-                  T2 = ResourcesSpan[i];
-                  assert(Total <= T1+T2);
-                  OverlapCycles =  T1+T2-Total;
-                  OverlapPercetage = (float)OverlapCycles/(float(min(T1, T2)));
-                  
-                }else{
-                  OverlapPercetage = 0;
-                }
-                fprintf(stderr, " %1.3f ", OverlapPercetage);
-                
-              }
-              dbgs() << "\n";
-            }
-            
-            
-            printHeaderStat("Bottlenecks");
-            dbgs() << "Bottleneck\tISSUE\tLAT\t";
-            for(int j=RS_STALL; j<= LFB_STALL; j++){
-              dbgs() << ResourcesNames[j] << "\t";
-            }
-            dbgs() << "\n";
-            uint64_t Work;
-            
-            for(unsigned i=0; i< nExecutionUnits; i++){
-              
-              // Work is always the total number of floating point operations... Otherwise it makes
-              // no sense to compare with the performance for memory nodes which is calcualted
-              // with total work
-              Work = InstructionsCount[0];
-              if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER)){
-                
-                dbgs() << ResourcesNames[i]<< "\t\t";
-                if(IssueSpan[i]>0){
-                  Performance = (float)Work/((float)IssueSpan[i]);
-                  fprintf(stderr, " %1.3f ", Performance);
-                }else
-                  dbgs() << INF<<"\t";
-                if(ResourcesSpan[i]>0){
-                  Performance = (float)Work/((float)ResourcesSpan[i]);
-                  fprintf(stderr, " %1.3f ", Performance);
-                }else
-                  dbgs() << INF<<"\t";
-                // dbgs() << "inf\t";
-                for(unsigned j=0; j< nBuffers; j++){
-                  if(ResourcesIssueStallSpanVector[i][j] >0 &&  ResourcesSpan[j+RS_STALL] !=0 ){
-                    Performance = (float)Work/((float)ResourcesIssueStallSpanVector[i][j]);
-                    fprintf(stderr, " %1.3f ", Performance);
-                  }else
-                    dbgs() << INF<<"\t";
                   
                 }
-                dbgs() << "\n";
+            }
+            dbgs() << "\n";
+          }
+      }
+      
+      
+      printHeaderStat("Stall-Stall Span");
+      
+      dbgs() << "RESOURCE";
+      for(unsigned j=RS_STALL; j<=LFB_STALL; j++){
+        dbgs() << "\t"<<ResourcesNames[j];
+      }
+      dbgs() << "\n";
+      
+      for(unsigned j=RS_STALL; j<= LFB_STALL; j++){
+        dbgs() << ResourcesNames[j]<< "\t\t";
+        for(unsigned i=RS_STALL; i< j; i++){
+          if (InstructionsCountExtended[j]!= 0 && InstructionsCountExtended[i]!=0) {
+            
+            TmpResourcesVector.clear();
+            TmpResourcesVector.push_back(j);
+            TmpResourcesVector.push_back(i);
+            PairSpan = CalculateGroupSpan(TmpResourcesVector);
+            
+          }else{
+            if(InstructionsCountExtended[i]==0){
+              PairSpan = ResourcesSpan[j];
+            }else{
+              if(InstructionsCountExtended[j]==0){
+                PairSpan = ResourcesSpan[i];
               }
             }
           }
           
-          printHeaderStat("Execution Times Breakdowns");
-          unsigned MinExecutionTime;
-          unsigned IssueEffects;
-          unsigned LatencyEffects;
-          unsigned StallEffects;
-          float Throughput = 0;
-          dbgs() << "RESOURCE\tMIN-EXEC-TIME\tISSUE-EFFECTS\tLATENCY-EFFECTS\tSTALL-EFFECTS\tTOTAL\n";
+          dbgs() << PairSpan << "\t";
+          StallStallSpanVector[j-RS_STALL][i-RS_STALL] = PairSpan;
+        }
+        dbgs() << "\n";
+      }
+      
+      printHeaderStat("Stall-Stall Overlap Percentage ");
+      
+      dbgs() << "RESOURCE";
+      for(unsigned j=RS_STALL; j <= LFB_STALL; j++){
+        dbgs() << "\t"<<ResourcesNames[j];
+      }
+      dbgs() << "\n";
+      
+      for(unsigned j=RS_STALL; j<= LFB_STALL; j++){
+        dbgs() << ResourcesNames[j]<< "\t\t";
+        for(unsigned i=RS_STALL; i< j; i++){
+          if (InstructionsCountExtended[j]!= 0 && InstructionsCountExtended[i]!=0) {
+            Total = StallStallSpanVector[j-RS_STALL][i-RS_STALL];
+            T1 = ResourcesSpan[j];
+            T2 = ResourcesSpan[i];
+            assert(Total <= T1+T2);
+            OverlapCycles =  T1+T2-Total;
+            OverlapPercetage = (float)OverlapCycles/(float(min(T1, T2)));
+            
+          }else{
+            OverlapPercetage = 0;
+          }
+          fprintf(stderr, " %1.3f ", OverlapPercetage);
           
-          for(unsigned i=0; i< nExecutionUnits; i++){
-            if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER)){
+        }
+        dbgs() << "\n";
+      }
+      
+      
+      printHeaderStat("Bottlenecks");
+      dbgs() << "Bottleneck\tISSUE\tLAT\t";
+      for(int j=RS_STALL; j<= LFB_STALL; j++){
+        dbgs() << ResourcesNames[j] << "\t";
+      }
+      dbgs() << "\n";
+      uint64_t Work;
+      
+      for(unsigned i=0; i< nExecutionUnits; i++){
+        
+        // Work is always the total number of floating point operations... Otherwise it makes
+        // no sense to compare with the performance for memory nodes which is calcualted
+        // with total work
+        Work = InstructionsCount[0];
+#ifdef INT_FP_OPS
+        if (!(MergeArithmeticOps &&  (i==FP_MULTIPLIER || i==FP_ADDER || i==INT_MULTIPLIER)) && !(MergeArithmeticOps && (i==FP_DIVIDER || i==INT_DIVIDER)))
+#else
+          if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER))
+#endif
+          {
+            
+            dbgs() << ResourcesNames[i]<< "\t\t";
+            if(IssueSpan[i]>0){
+              Performance = (float)Work/((float)IssueSpan[i]);
+              fprintf(stderr, " %1.3f ", Performance);
+            }else
+              dbgs() << INF<<"\t";
+            if(ResourcesSpan[i]>0){
+              Performance = (float)Work/((float)ResourcesSpan[i]);
+              fprintf(stderr, " %1.3f ", Performance);
+            }else
+              dbgs() << INF<<"\t";
+            // dbgs() << "inf\t";
+            for(unsigned j=0; j< nBuffers; j++){
+              if(ResourcesIssueStallSpanVector[i][j] >0 &&  ResourcesSpan[j+RS_STALL] !=0 ){
+                Performance = (float)Work/((float)ResourcesIssueStallSpanVector[i][j]);
+                fprintf(stderr, " %1.3f ", Performance);
+              }else
+                dbgs() << INF<<"\t";
               
-              if (InstructionsCountExtended[i]==0) {
-                MinExecutionTime = 0;
-                LatencyEffects = 0;
-                IssueEffects = 0;
-                StallEffects = ResourcesTotalStallSpanVector[i];
-              }else{
-                if (ExecutionUnitsParallelIssue[i]==INF) {
-                  if (ExecutionUnitsThroughput[i]==INF) {
-                    Throughput = INF;
-                  }else{
-                    Throughput = ExecutionUnitsThroughput[i];
-                    dbgs() << "Setting thoughput to " << ExecutionUnitsThroughput[i] << "\n";
-                  }
+            }
+            dbgs() << "\n";
+          }
+      }
+      
+      printHeaderStat("Execution Times Breakdowns");
+      unsigned MinExecutionTime;
+      unsigned IssueEffects;
+      unsigned LatencyEffects;
+      unsigned StallEffects;
+      float Throughput = 0;
+      dbgs() << "RESOURCE\tMIN-EXEC-TIME\tISSUE-EFFECTS\tLATENCY-EFFECTS\tSTALL-EFFECTS\tTOTAL\n";
+      
+      for(unsigned i=0; i< nExecutionUnits; i++){
+#ifdef INT_FP_OPS
+        if (!(MergeArithmeticOps &&  (i==FP_MULTIPLIER || i==FP_ADDER || i==INT_MULTIPLIER)) && !(MergeArithmeticOps && (i==FP_DIVIDER || i==INT_DIVIDER)))
+#else
+          if (!(MergeArithmeticOps &&  i==FP_MULTIPLIER) && !(MergeArithmeticOps && i==FP_DIVIDER))
+#endif
+          {
+            
+            if (InstructionsCountExtended[i]==0) {
+              MinExecutionTime = 0;
+              LatencyEffects = 0;
+              IssueEffects = 0;
+              StallEffects = ResourcesTotalStallSpanVector[i];
+            }else{
+              if (ExecutionUnitsParallelIssue[i]==INF) {
+                if (ExecutionUnitsThroughput[i]==INF) {
+                  Throughput = INF;
                 }else{
-                  if (ExecutionUnitsThroughput[i]==INF) {
-                    Throughput = ExecutionUnitsParallelIssue[i];
-                  }else{
-                    Throughput = ExecutionUnitsThroughput[i]*ExecutionUnitsParallelIssue[i];
-                  }
+                  Throughput = ExecutionUnitsThroughput[i];
                 }
-                
+              }else{
+                if (ExecutionUnitsThroughput[i]==INF) {
+                  Throughput = ExecutionUnitsParallelIssue[i];
+                }else{
+                  Throughput = ExecutionUnitsThroughput[i]*ExecutionUnitsParallelIssue[i];
+                }
+              }
+              
+              if(ExecutionUnitsLatency[i]==0 && Throughput == INF){
+                MinExecutionTime = 0;
+              }else{
                 if (i < nCompExecutionUnits) {
                   if (Throughput == INF) {
                     MinExecutionTime = 1;
@@ -5582,83 +6504,124 @@ DynamicAnalysis::finishAnalysis(){
                 }else{
                   if (Throughput == INF) {
                     MinExecutionTime = 1;
-                  }else
+                  }else{
                     MinExecutionTime = (unsigned)ceil(InstructionsCountExtended[i]*AccessGranularities[i]/(Throughput));
-                  dbgs() << "InstructionsCountExtended[i] " << InstructionsCountExtended[i] << "\n";
-                  dbgs() << "Throughput " << Throughput << "\n";
-                  dbgs() << "MinExecutionTime " << MinExecutionTime << "\n";
-                }
-                
-                if (Throughput==INF && IssueSpan[i]==1 ) {
-                  IssueEffects = 0;
-                  
-                }else{
-                  if (IssueSpan[i] < MinExecutionTime) {
-                    PrintWarning = true;
-                    IssueSpan[i] = MinExecutionTime;
-                    //report_fatal_error("IssueSpan < Min execution time");
                   }
-                  IssueEffects = IssueSpan[i] - MinExecutionTime;
                 }
+              }
+              /*
+               if (Throughput==INF && IssueSpan[i]==1 ) {
+               IssueEffects = 0;
+               
+               }else{
+               */
+              if (IssueSpan[i] < MinExecutionTime) {
+                PrintWarning = true;
+                IssueSpan[i] = MinExecutionTime;
+                //report_fatal_error("IssueSpan < Min execution time");
+              }
+              IssueEffects = IssueSpan[i] - MinExecutionTime;
+              //              }
+              
+              
+              if (ResourcesSpan[i]!=0) {
                 LatencyEffects = ResourcesSpan[i] - IssueSpan[i];
-                StallEffects = ResourcesTotalStallSpanVector[i] - ResourcesSpan[i];
-                
               }
               
-              dbgs() << ResourcesNames[i]<< "\t\t";
-              dbgs() << " " << MinExecutionTime;
-              //  fprintf(stderr, " %1.3f ", MinExecutionTime);
-              dbgs() << "\t";
-              dbgs() << " " << IssueEffects;
-              // fprintf(stderr, " %1.3f ", IssueEffects);
-              dbgs() << "\t";
-              dbgs() << " " << LatencyEffects;
-              // fprintf(stderr, " %1.3f ", LatencyEffects);
-              dbgs() << "\t";
-              dbgs() << " " << StallEffects;
-              // fprintf(stderr, " %1.3f ", StallEffects);
-              if (MinExecutionTime + IssueEffects + LatencyEffects +  StallEffects != ResourcesTotalStallSpanVector[i]) {
-                report_fatal_error("Breakdown of execution time does not match total execution time\n");
-                
-              }else{
-                dbgs() << "\t"<< ResourcesTotalStallSpanVector[i]<<"\n";
-              }
+              StallEffects = ResourcesTotalStallSpanVector[i] - ResourcesSpan[i];
+              
+            }
+            
+            dbgs() << ResourcesNames[i]<< "\t\t";
+            dbgs() << " " << MinExecutionTime;
+            //  fprintf(stderr, " %1.3f ", MinExecutionTime);
+            dbgs() << "\t";
+            dbgs() << " " << IssueEffects;
+            // fprintf(stderr, " %1.3f ", IssueEffects);
+            dbgs() << "\t";
+            dbgs() << " " << LatencyEffects;
+            // fprintf(stderr, " %1.3f ", LatencyEffects);
+            dbgs() << "\t";
+            dbgs() << " " << StallEffects;
+            // fprintf(stderr, " %1.3f ", StallEffects);
+            if (MinExecutionTime + IssueEffects + LatencyEffects +  StallEffects != ResourcesTotalStallSpanVector[i] && MinExecutionTime!= 0) {
+              report_fatal_error("Breakdown of execution time does not match total execution time\n");
+              
+            }else{
+              dbgs() << "\t"<< ResourcesTotalStallSpanVector[i]<<"\n";
             }
           }
-          
-          
-          
-          
-          printHeaderStat("TOTAL");
-          dbgs() << "TOTAL FLOPS"<< "\t"<<InstructionsCount[0] <<"\t\t"<<CalculateGroupSpan(compResources)<<" \n";
-          dbgs() << "TOTAL MOPS"<< "\t"<<InstructionsCount[1]<<"\t\t"<<CalculateGroupSpan(memResources)<<" \n";
-          dbgs() << "TOTAL"<< "\t\t"<<InstructionsCount[0] +InstructionsCount[1]<<"\t\t"<<TotalSpan<<" \n";
-          Performance = (float)InstructionsCount[0]/((float)TotalSpan);
-          fprintf(stderr, "PERFORMANCE %1.3f\n", Performance);
-          if(PrintWarning == true)
-            dbgs() << "WARNING: IssueSpan < MinExecutionTime\n";
-          
+      }
+      
+      
+      
+      
+      printHeaderStat("TOTAL");
+      dbgs() << "TOTAL FLOPS"<< "\t"<<InstructionsCount[0] <<"\t\t"<<CalculateGroupSpan(compResources)<<" \n";
+      dbgs() << "TOTAL MOPS"<< "\t"<<InstructionsCount[1]<<"\t\t"<<CalculateGroupSpan(memResources)<<" \n";
+      dbgs() << "TOTAL"<< "\t\t"<<InstructionsCount[0] +InstructionsCount[1]<<"\t\t"<<TotalSpan<<" \n";
+      Performance = (float)InstructionsCount[0]/((float)TotalSpan);
+      fprintf(stderr, "PERFORMANCE %1.3f\n", Performance);
+      if(PrintWarning == true)
+        dbgs() << "WARNING: IssueSpan < MinExecutionTime\n";
+      
+      
+      
 #ifdef ILP_DISTRIBUTION
-          if(TotalSpan != SpanDistribution)
-            dbgs() << "WARNING: Total Span differs! \n";
-          
-          for (int j = 0; j< N_INST_TYPES; j++){
-            if(InstructionsSpan[j] != InstructionsSpanDistribution[j]){
-              dbgs() << "WARNING: Per type span differs!\n";
-              dbgs() << "Span distribution type "<< j<<": "<< InstructionsSpanDistribution[j]<<"\n";
-            }
-          }
-          
+      if(TotalSpan != SpanDistribution)
+        dbgs() << "WARNING: Total Span differs! \n";
+      
+      for (int j = 0; j< N_INST_TYPES; j++){
+        if(InstructionsSpan[j] != InstructionsSpanDistribution[j]){
+          dbgs() << "WARNING: Per type span differs!\n";
+          dbgs() << "Span distribution type "<< j<<": "<< InstructionsSpanDistribution[j]<<"\n";
+        }
+      }
+      
 #endif
-          
+      
+    }
+    
+    // TODO: I should really try to clean up all memory
+    // Deallocate memory
+#ifdef SOURCE_CODE_ANALYSIS
+    
+    printHeaderStat("SOURCE CODE LINE INFO");
+    
+    
+    //First, iterate over the map that contains an entry for each code line, and the value
+    //mapped is a set of all the distinct cycles to which this source code line contributes to
+    typedef unordered_map<uint64_t,set<uint64_t> >::iterator it_type;
+    typedef unordered_map<uint64_t,vector<uint64_t> >::iterator it_type2;
+    
+    for(it_type iterator = SourceCodeLineOperations.begin(); iterator != SourceCodeLineOperations.end(); iterator++) {
+      dbgs() << "Operations in line " <<  iterator->first << "\n";
+      for (std::set<uint64_t>::iterator it=iterator->second.begin(); it!=iterator->second.end(); ++it){
+        dbgs() << " " <<  ResourcesNames[*it];
+      }
+      dbgs() << "\n";
+    }
+    
+    
+    for(it_type iterator = SourceCodeLineInfo.begin(); iterator != SourceCodeLineInfo.end(); iterator++) {
+      dbgs() << "Line " <<  iterator->first << "\n";
+      dbgs() << "Cycle " <<  iterator->second.size() << "\n";
+      unordered_map<uint64_t,vector<uint64_t> >::iterator it = SourceCodeLineInfoBreakdown.find (iterator->first);
+      if ( it == SourceCodeLineInfoBreakdown.end() )
+        report_fatal_error("Source code line not found\n");
+      else{
+        // Iterate over the vector
+        for (unsigned i = 0; i < it->second.size(); i++) {
+          dbgs() << " " <<  it->second[i];
         }
-        
-        // TODO: I should really try to clean up all memory
-        // Deallocate memory
-        for (unsigned i = 0; i< FullOccupancyCyclesTree.size(); i++) {
-          FullOccupancyCyclesTree[i]=NULL;
-        }
-  
-  
+        dbgs() << "\n";
+      }
+      
+    }
+    
+#endif
+    
+    
   }
   
+}

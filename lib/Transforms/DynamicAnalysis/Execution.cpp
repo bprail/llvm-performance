@@ -1,6 +1,18 @@
-//===-- Execution.cpp - 
-//  Stripped Execution engine uses Contech task graph to drive the dynamic analysis
+//===-- Execution.cpp - Implement code to simulate the program ------------===//
+//
+//                     The LLVM Compiler Infrastructure
+//
+// This file is distributed under the University of Illinois Open Source
+// License. See LICENSE.TXT for details.
+//
+//===----------------------------------------------------------------------===//
+//
+//  This file contains the actual instruction interpreter.
+//
+//===----------------------------------------------------------------------===//
 
+#define DEBUG_TYPE "interpreter"
+#include "Interpreter.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/CodeGen/IntrinsicLowering.h"
@@ -12,24 +24,17 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/GetElementPtrTypeIterator.h"
 #include "llvm/Support/MathExtras.h"
-#include "llvm/Pass.h"
 #include <algorithm>
 #include <cmath>
-#include <map>
-
-
-#include "llvm/IR/Module.h"
-#include <cxxabi.h>
-#include <Contech/TaskGraph.hpp>
 
 //VCA
-#include "DynamicAnalysis.h"
+#include "llvm/Support/DynamicAnalysis.h"
 static DynamicAnalysis* Analyzer;
 
 
 using namespace std;
 using namespace llvm;
-using namespace contech;
+
 
 STATISTIC(NumDynamicInsts, "Number of dynamic instructions executed");
 
@@ -48,7 +53,7 @@ static cl::opt<string> TargetFunction("function", cl::desc("Name of the function
 
 static cl::opt <unsigned> MemoryWordSize("memory-word-size", cl::desc("Specify the size in bytes of a data item. Default value is 8 (double precision)"),cl::init(8));
 
-static cl::opt <unsigned> CacheLineSize("cache-line-size", cl::desc("Specify the cache line size (B). Default value is 64 B"),cl::init(64));
+static cl::opt <unsigned> CacheLineSize("cache-line-size", cl::desc("Specify the cache line size (B). Default value is 8 B"),cl::init(8));
 
 static cl::opt <unsigned> L1CacheSize("l1-cache-size", cl::desc("Specify the size of the L1 cache (in bytes). Default value is 32 KB"),cl::init(32768));
 
@@ -105,286 +110,7 @@ static cl::opt < bool > InOrderExecution("in-order-execution", cl::Hidden, cl::d
 
 static cl::opt < bool > ReportOnlyPerformance("report-only-performance", cl::Hidden, cl::desc("Reports only performance (op count and span)"),cl::init(false));
 
-static cl::opt <string> TaskGraphFileName("taskgraph-file", cl::desc("File with Contech Task Graph"), cl::value_desc("filename"));
 
-#define __ctStrCmp(x, y) strncmp(x, y, sizeof(y) - 1)
-
-class EnginePass : public ModulePass
-{
-    map <unsigned int, BasicBlock*> basicBlockMap;
-    
-public:
-    static char ID; // Pass identification, replacement for typeid
-    EnginePass() : ModulePass(ID) {
-        }
-    virtual bool doInitialization(Module &M);
-    virtual bool runOnModule(Module &M);
-    bool internalSplitOnCall(BasicBlock &B, CallInst** tci, int* st);
-};
-
-char EnginePass::ID = 0;
-static RegisterPass<EnginePass> X("EnginePass", "Engine Pass", false, false);
-
-bool EnginePass::doInitialization(Module &M)
-{
-    Analyzer = new DynamicAnalysis(TargetFunction, 
-                                   Microarchitecture, 
-                                   MemoryWordSize, 
-                                   CacheLineSize, 
-                                   L1CacheSize, 
-                                   L2CacheSize, 
-                                   LLCCacheSize, 
-                                   ExecutionUnitsLatency, 
-                                   ExecutionUnitsThroughput, 
-                                   ExecutionUnitsParallelIssue, 
-                                   MemAccessGranularity, 
-                                   AddressGenerationUnits, 
-                                   IFB, 
-                                   ReservationStation, 
-                                   ReorderBuffer, 
-                                   LoadBuffer, 
-                                   StoreBuffer, 
-                                   LineFillBuffer, 
-                                   WarmCache, 
-                                   x86MemoryModel, 
-                                   SpatialPrefetcher, 
-                                   ConstraintPorts, 
-                                   ConstraintAGUs, 
-                                   0, 
-                                   InOrderExecution,
-                                   ReportOnlyPerformance,
-                                   PrefetchLevel, 
-                                   PrefetchDispatch, 
-                                   PrefetchTarget);
-  
-    return true;
-}
-
-bool EnginePass::internalSplitOnCall(BasicBlock &B, CallInst** tci, int* st)
-{
-    *tci = NULL;
-    for (BasicBlock::iterator I = B.begin(), E = B.end(); I != E; ++I){
-        if (CallInst *ci = dyn_cast<CallInst>(&*I)) {
-            *tci = ci;
-            if (ci->isTerminator()) {*st = 1; return false;}
-            if (ci->doesNotReturn()) {*st = 2; return false;}
-            Function* f = ci->getCalledFunction();
-            
-            //
-            // If F == NULL, then f is indirect
-            //   O.w. this function may just be an annotation and can be ignored
-            //
-            if (f != NULL)
-            {
-                const char* fn = f->getName().data();
-                if (0 == __ctStrCmp(fn, "llvm.dbg") ||
-                    0 == __ctStrCmp(fn, "llvm.lifetime") ||
-                    0 == __ctStrCmp(fn, "__ct")) 
-                {
-                    *st = 3;
-                    continue;
-                }
-            
-            }
-            
-            I++;
-            
-            // At this point, the call instruction returns and was not the last in the block
-            //   If the next instruction is a terminating, unconditional branch then splitting
-            //   is redundant.  (as splits create a terminating, unconditional branch)
-            if (I->isTerminator())
-            {
-                if (BranchInst *bi = dyn_cast<BranchInst>(&*I))
-                {
-                    if (bi->isUnconditional()) {*st = 4; return false;}
-                }
-                else if (/* ReturnInst *ri = */ dyn_cast<ReturnInst>(&*I))
-                {
-                    *st = 5;
-                    return false;
-                }
-            }
-            B.splitBasicBlock(I, "");
-            return true;
-        }
-    }
-
-    return false;
-}
-
-bool EnginePass::runOnModule(Module &M)
-{
-    for (Module::iterator F = M.begin(), FE = M.end(); F != FE; ++F) 
-    {
-        // Split basic blocks, as the toolchain may combine basic blocks
-        //   that were split for function calls
-        // "Normalize" every basic block to have only one function call in it
-        for (Function::iterator B = F->begin(), BE = F->end(); B != BE; ) {
-            BasicBlock &pB = *B;
-            CallInst *ci;
-            int status = 0;
-
-            if (internalSplitOnCall(pB, &ci, &status) == false)
-            {
-                B++;
-            }
-            else {
-                
-            }
-        }
-    
-        for (Function::iterator itB = F->begin(), etB = F->end(); itB != etB; ++itB) 
-        {
-            BasicBlock &B = *itB;
-            
-            for (BasicBlock::iterator I = B.begin(), E = B.end(); I != E; ++I)
-            {
-                if (CallInst *ci = dyn_cast<CallInst>(&*I)) {
-                    Function *f = ci->getCalledFunction();
-                    
-                    // call is indirect
-                    // TODO: add dynamic check on function called
-                    if (f == NULL) { continue; }
-
-                    int status;
-                    const char* fmn = f->getName().data();
-                    char* fdn = abi::__cxa_demangle(fmn, 0, 0, &status);
-                    const char* fn = fdn;
-                    if (status != 0) 
-                    {
-                        fn = fmn;
-                    }
-                    
-                    // Find the store basic block calls to find the ID for this block
-                    if (strcmp(fn, "__ctStoreBasicBlock") == 0)
-                    {
-                        Value* v = ci->getArgOperand(0);
-                        if (Constant* cint = dyn_cast<Constant>(v))
-                        {
-                            unsigned int bbid = cint->getUniqueInteger().getLimitedValue((0x1 << 24));
-                            basicBlockMap[bbid] = dyn_cast<BasicBlock>(&B);
-                            errs() << "Found - " << bbid << "\n";
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // All static basic blocks have been identified,
-    //   now load the task graph
-    
-    TaskGraph* tg = TaskGraph::initFromFile(TaskGraphFileName.c_str());
-
-    if (tg == NULL)
-    {
-        errs() << "Failed to open task graph - " << TaskGraphFileName << "\n";
-        return false;
-    }
-    
-    unsigned int bbcount = 0;
-    while (Task* currentTask = tg->getNextTask())
-    {
-        if (currentTask->getContextId() != 1) { delete currentTask; continue;}
-        switch(currentTask->getType())
-        {
-            case task_type_basic_blocks:
-            {
-                auto bba = currentTask->getBasicBlockActions();
-                for (auto f = bba.begin(), e = bba.end(); f != e; f++)
-                {
-                    BasicBlockAction bb = *f;
-                    
-                    //if (bbcount > 10000) return false;
-                    
-                    auto bbm = basicBlockMap.find((uint)bb.basic_block_id);
-                    if (bbm == basicBlockMap.end())
-                    {
-                        errs() << "Failed to find - " << (uint)bb.basic_block_id << " - ";
-                        auto bbi = tg->getTaskGraphInfo()->getBasicBlockInfo((uint)bb.basic_block_id);
-                        errs() << bbi.fileName << ":" << bbi.lineNumber << " " << bbi.functionName << "\n";
-                        return false;
-                    }
-                    else
-                    {
-                        // Send instructions from block bbm->second to DynamicAnalysis
-                        BasicBlock* currentBB = bbm->second;
-                        auto iMemOps = f.getMemoryActions().begin();
-                        //errs() << *currentBB << "\n";
-                        for (auto it = currentBB->begin(), et = currentBB->end(); it != et; ++it)
-                        {
-                            uint64_t addr = 0;
-                            
-                            // test for Contech instrumentation instructions
-                            //   call store ...
-                            //   fence ...
-                            
-                            if (LoadInst *li = dyn_cast<LoadInst>(&*it))
-                            {
-                                MemoryAction ma = *iMemOps;
-                                addr = ma.addr;
-                                ++iMemOps;
-                            }
-                            else if (StoreInst *si = dyn_cast<StoreInst>(&*it))
-                            {
-                                MemoryAction ma = *iMemOps;
-                                addr = ma.addr;
-                                ++iMemOps;
-                            }
-                            else if (FenceInst *feni = dyn_cast<FenceInst>(&*it))
-                            {
-                                continue;
-                            }
-                            else if (CallInst *ci = dyn_cast<CallInst>(&*it)) {
-                                Function *f = ci->getCalledFunction();
-                                
-                                // call is indirect
-                                // TODO: add dynamic check on function called
-                                if (f == NULL) {  }
-                                else
-                                {
-
-                                    int status;
-                                    const char* fmn = f->getName().data();
-                                    char* fdn = abi::__cxa_demangle(fmn, 0, 0, &status);
-                                    const char* fn = fdn;
-                                    if (status != 0) 
-                                    {
-                                        fn = fmn;
-                                    }
-                                    
-                                    if (__ctStrCmp(fn, "__ct") == 0 ||
-                                        __ctStrCmp(fn, "llvm.dbg") == 0)
-                                    {
-                                        continue;
-                                    }
-                                    else
-                                    {
-                                        //errs() << fn << "\n";
-                                    }
-                                }
-                            }
-                            //errs() << *it << "\n";
-                            Analyzer->analyzeInstruction(*it, addr);
-                        }
-                        bbcount ++;
-                    }
-                }
-            }
-            break;
-            default:
-            break;
-        }
-    
-        delete currentTask;
-    }
-    Analyzer->finishAnalysis();
-    
-    return false;
-}
-
-#if 0
 
 //===----------------------------------------------------------------------===//
 //                     Various Helper Functions
@@ -1471,7 +1197,7 @@ return NULL;    }
         --me;
       IL->LowerIntrinsicCall(cast<CallInst>(CS.getInstruction()));
         // Here instruction is still well-formed
-        dbgs() << *SF.CurInst << "\n";
+      //  dbgs() << *SF.CurInst << "\n";
 
       // Restore the CurInst pointer to the first instruction newly inserted, if
       // any.
@@ -1481,7 +1207,7 @@ return NULL;    }
         SF.CurInst = me;
         ++SF.CurInst;
       }
-        dbgs() << *SF.CurInst << "\n";
+   //     dbgs() << *SF.CurInst << "\n";
       return NULL;
     }
 
@@ -2615,44 +2341,31 @@ void Interpreter::run() {
   bool TargetFunctionCalled = false;
   bool TargetFunctionExecuted = false;
   
-  //VCA
-  clock_t tStart, tEnd;
-  float Cycles, ExecutionTime;
+  //================== Code inserted into the interpreter ================
+  clock_t tStart, tEnd, tStartPostProcessing, tEndPostProcessing;
+  float Cycles, ExecutionTime, CyclesPostProcessing, ExecutionTimePostProcessing;
   
-  /*
-  Analyzer = new DynamicAnalysis(TargetFunction, MemoryWordSize, CacheLineSize, L1CacheSize, L2CacheSize, LLCCacheSize, FLatency, MLatency, FlopIssueThroughput, FlopIssueWidth, MemAccessGranularity, MemIssueThroughput, MemIssueWidth, AddressGenerationUnits, IFB, ReservationStation, ReorderBuffer, LoadBuffer, StoreBuffer, LineFillBuffer, WarmCache, x86MemoryModel, SpatialPrefetcher, ConstraintThroughput, 0, InOrderExecution);
-  */
-  
+
   Analyzer = new DynamicAnalysis(TargetFunction, Microarchitecture, MemoryWordSize, CacheLineSize, L1CacheSize, L2CacheSize, LLCCacheSize, ExecutionUnitsLatency, ExecutionUnitsThroughput, ExecutionUnitsParallelIssue, MemAccessGranularity, AddressGenerationUnits, IFB, ReservationStation, ReorderBuffer, LoadBuffer, StoreBuffer, LineFillBuffer, WarmCache, x86MemoryModel, SpatialPrefetcher, ConstraintPorts, ConstraintAGUs, 0, InOrderExecution,ReportOnlyPerformance,PrefetchLevel, PrefetchDispatch, PrefetchTarget);
-  
    tStart = clock();
   bool startAnalysis = false;
-  // END VCA
-    
+  
     vector<ExecutionContext> ECStack2 = ECStack;
   
   if (WarmCache && TargetFunction.compare("main") == 0) {
     report_fatal_error("Warm cache scenario for main function requires two executions.\n");
 
   }
-  
+  //====================================================================
+
   while (!ECStack.empty()) {
    
     ExecutionContext &SF = ECStack.back();  // Current stack frame
     Instruction &I = *SF.CurInst++;         // Increment before execute
   
-      
-    // Interpret a single instruction & increment the "PC".
-  //  ExecutionContext &SF = ECStack.back();  // Current stack frame
-  //  Instruction &I = *SF.CurInst++;         // Increment before execute
-  
     // Track the number of dynamic instructions executed.
     ++NumDynamicInsts;
-      
- //   DEBUG(dbgs()<<  I<< "\n");
-//	dbgs() << "Parent name " << I.getParent()->getParent()->getName() << "\n";
     
-    //VCA
     // Check for conditions of execution. It is doing before visiting the instruction
     // because lowering some instructions may cause a segmentation fault when
     // accessing instruction properties.
@@ -2683,19 +2396,15 @@ void Interpreter::run() {
     
     
     if(!isDebugInstruction && (isTargetFunction || isCalledFromTarget)){
-      if (MDNode *N = I.getMetadata("dbg")) {  // Here I is an LLVM instruction
-        DILocation Loc(N);                      // DILocation is in DebugInfo.h
-        unsigned SourceCodeLine = Loc.getLineNumber();
-        //DEBUG(dbgs() << "Source code line " << SourceCodeLine << "\n");
-      }
+
       if (isCallInstruction) {
-        /*
-         Make sure it is not a C++ built-in function (check llvm-nm.cpp to see how
-         to distinguish different function types, e.g., declared functions vs. defined function).
+        
+        // Make sure it is not a C++ built-in function (check llvm-nm.cpp to see how
+         //to distinguish different function types, e.g., declared functions vs. defined function).
          
-         Check first if the called function is a function, to avoid
-         segmentation faults in instructions like this one:
-         %call31.i.i.i = call i8* %49(i8* %50, i32 %mul29.i.i.i, i32 1) nounwind*/
+        // Check first if the called function is a function, to avoid
+        // segmentation faults in instructions like this one:
+        // %call31.i.i.i = call i8* %49(i8* %50, i32 %mul29.i.i.i, i32 1) nounwind
         if(static_cast<CallInst&>(I).getCalledFunction()){
           if(!static_cast<CallInst&>(I).getCalledFunction()->isDeclaration()){
             Analyzer->FunctionCallStack++;
@@ -2711,7 +2420,7 @@ void Interpreter::run() {
         }
         }
       Analyzer->TotalInstructions++;
-    //  DEBUG(dbgs() << "Instruction count: " << Analyzer->TotalInstructions << "\n");
+
       Analyzer->analyzeInstruction(I, SF, visitResult);
 
    if (isTargetFunction==true && TargetFunctionCalled==false) {
@@ -2725,7 +2434,12 @@ void Interpreter::run() {
           ExecutionTime = Cycles / CLOCKS_PER_SEC;
           if (!(WarmCache && Analyzer->rep == 0)) {
 
+             tStartPostProcessing = clock();
             Analyzer->finishAnalysis();
+            tEndPostProcessing = clock();
+            CyclesPostProcessing = ((float)tEndPostProcessing - (float)tStartPostProcessing);
+            ExecutionTimePostProcessing = CyclesPostProcessing / CLOCKS_PER_SEC;
+            dbgs() << "Execution time Post processing " << ExecutionTimePostProcessing << " s\n";
           }else{
 
       TargetFunctionExecuted= true;
@@ -2744,11 +2458,6 @@ void Interpreter::run() {
         }
       }
     }
-    
-    
-
-    
-// END VCA
     
     
   
@@ -2774,7 +2483,6 @@ DEBUG(
       }
     });
 #endif
- // }
   }
   
   delete(Analyzer);
@@ -2783,6 +2491,5 @@ DEBUG(
   ExecutionTime = Cycles / CLOCKS_PER_SEC;
   dbgs() << "Total Execution time " << ExecutionTime << " s\n";
   
+  
 }
-
-#endif
