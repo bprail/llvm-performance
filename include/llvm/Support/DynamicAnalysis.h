@@ -16,34 +16,46 @@
 #include "llvm/DebugInfo.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/ADT/SmallString.h"
-#include "llvm/Support/top-down-size-splay.hpp"
+//#include "llvm/Support/top-down-size-splay.hpp"
 #include "llvm/Support/InstIterator.h"
 #include "llvm/Support/GetElementPtrTypeIterator.h"
 
+#define INTERPRETER
 
+#ifdef INTERPRETER
+#include "llvm/Support/top-down-size-splay.hpp"
+#else
+#include "top-down-size-splay.hpp"
+#endif
+
+//#define INT_FP_OPS
 
 #include <iostream>
 #include <map>
 #include <stdarg.h>
 #include <stdio.h>
 
+#ifdef SOURCE_CODE_ANALYSIS
+#include <unordered_map>
+#endif
+#include <deque>
 #define ROUND_REUSE_DISTANCE
 #define REDUCED_INST_TYPES
 #define NORMAL_REUSE_DISTRIBUTION
 
 
-
-#define DEBUG_MEMORY_TRACES
+//#define DEBUG_SOURCE_CODE_LINE_ANALYSIS
+//#define DEBUG_MEMORY_TRACES
 #define DEBUG_REUSE_DISTANCE
-
-#define DEBUG_DEPS_FUNCTION_CALL
+#define DEBUG_GENERIC
+//#define DEBUG_DEPS_FUNCTION_CALL
 #define DEBUG_SPAN_CALCULATION
-#define DEBUG_AGU
+//#define DEBUG_AGU
 //#define DEBUG_OOO_BUFFERS
 #define DEBUG_ISSUE_CYCLE
-#define DEBUG_PHI_NODE
+//#define DEBUG_PHI_NODE
 //#define DEBUG_FUNCTION_CALL_STACK
-#define DEBUG_PREFETCHER
+//#define DEBUG_PREFETCHER
 
 //#define ILP_DISTRIBUTION
 //#define MICROSCHEDULING
@@ -70,40 +82,68 @@
 
 #ifdef REDUCED_INST_TYPES
 
-#define INT_ADD         -1
-#define INT_SUB         -1
-#define INT_MUL         -1
-#define INT_DIV         -1
+#ifdef INT_FP_OPS
+#define INT_ADD          0
+#define INT_SUB          0
+#define INT_MUL          0
+#define INT_DIV          0
+#else
+#define INT_ADD          -1
+#define INT_SUB          -1
+#define INT_MUL          -1
+#define INT_DIV          -1
+#endif
+
 #define INT_REM         -1
-#define INT_LD_4_BITS   -1
-#define INT_LD_8_BITS   -1
-#define INT_LD_16_BITS  -1
-#define INT_LD_32_BITS  -1
+#ifdef INT_FP_OPS
+#define INT_LD_4_BITS    1
+#define INT_LD_8_BITS    1
+#define INT_LD_16_BITS   1
+#define INT_LD_32_BITS   1
+#define INT_LD_64_BITS   1
+#define INT_LD_80_BITS   1
+#define INT_LD_128_BITS  1
+#define INT_ST_4_BITS    1
+#define INT_ST_8_BITS    1
+#define INT_ST_16_BITS   1
+#define INT_ST_32_BITS   1
+#define INT_ST_64_BITS   1
+#define INT_ST_80_BITS   1
+#define INT_ST_128_BITS  1
+
+#else
+#define INT_LD_4_BITS    -1
+#define INT_LD_8_BITS    -1
+#define INT_LD_16_BITS   -1
+#define INT_LD_32_BITS   -1
 #define INT_LD_64_BITS   -1
-#define INT_LD_80_BITS  -1
-#define INT_LD_128_BITS -1
-#define INT_ST_4_BITS   -1
-#define INT_ST_8_BITS   -1
-#define INT_ST_16_BITS  -1
-#define INT_ST_32_BITS  -1
-#define INT_ST_64_BITS  1
-#define INT_ST_80_BITS  -1
-#define INT_ST_128_BITS -1
+#define INT_LD_80_BITS   -1
+#define INT_LD_128_BITS  -1
+#define INT_ST_4_BITS    -1
+#define INT_ST_8_BITS    -1
+#define INT_ST_16_BITS   -1
+#define INT_ST_32_BITS   -1
+#define INT_ST_64_BITS   -1
+#define INT_ST_80_BITS   -1
+#define INT_ST_128_BITS  -1
+
+#endif
+
 #define FP_ADD           0
 #define FP_SUB           0
 #define FP_MUL           0
 #define FP_DIV           0
 #define FP_REM          -1
-#define FP_LD_16_BITS   -1
+#define FP_LD_16_BITS    1
 #define FP_LD_32_BITS    1
 #define FP_LD_64_BITS    1
-#define FP_LD_80_BITS   -1
-#define FP_LD_128_BITS  -1
-#define FP_ST_16_BITS   -1
-#define FP_ST_32_BITS   1
+#define FP_LD_80_BITS    1
+#define FP_LD_128_BITS   1
+#define FP_ST_16_BITS    1
+#define FP_ST_32_BITS    1
 #define FP_ST_64_BITS    1
-#define FP_ST_80_BITS   -1
-#define FP_ST_128_BITS  -1
+#define FP_ST_80_BITS    1
+#define FP_ST_128_BITS   1
 #define MISC_MEM        -1
 #define CTRL            -1
 #define VECTOR_SHUFFLE   0
@@ -123,7 +163,7 @@
 #define INT_LD_128_BITS 11
 #define INT_ST_4_BITS   12
 #define INT_ST_8_BITS   13
-#define INT_S`T_16_BITS  14
+#define INT_ST_16_BITS  14
 #define INT_ST_32_BITS  15
 #define INT_ST_64_BITS  16
 #define INT_ST_80_BITS  17
@@ -224,22 +264,59 @@
 
 // These are execution units, o resources -> there is an available and
 // and full occupancy tree from them
+#ifdef INT_FP_OPS
+#define SANDY_BRIDGE_EXECUTION_UNITS 13 //9
+#define SANDY_BRIDGE_NODES 28 //23
+#define SANDY_BRIDGE_COMP_EXECUTION_UNITS 8 //4
+#else
 #define SANDY_BRIDGE_EXECUTION_UNITS 9
+#define SANDY_BRIDGE_NODES 23
+#define SANDY_BRIDGE_COMP_EXECUTION_UNITS 4
+#endif
+
 #define SANDY_BRIDGE_DISPATCH_PORTS 5
 #define SANDY_BRIDGE_BUFFERS 5
 #define SANDY_BRIDGE_AGUS 2
 #define SANDY_BRIDGE_LOAD_AGUS 0
 #define SANDY_BRIDGE_STORE_AGUS 0
 #define SANDY_BRIDGE_PREFETCH_NODES 3
-#define SANDY_BRIDGE_NODES 23
 
-
-
-#define SANDY_BRIDGE_COMP_EXECUTION_UNITS 4
 #define SANDY_BRIDGE_MEM_EXECUTION_UNITS 5
 #define SANDY_BRIDGE_AGU 1
 
 
+#ifdef INT_FP_OPS
+#define INT_ADDER 0
+#define INT_MULTIPLIER 1
+#define INT_DIVIDER 2
+#define INT_SHUFFLE 3
+#define FP_ADDER  4 //0
+#define FP_MULTIPLIER 5 //1
+#define FP_DIVIDER  6 //2
+#define FP_SHUFFLE  7 //3
+#define L1_LOAD_CHANNEL 8 //4
+#define L1_STORE_CHANNEL  9 //5
+#define L2_LOAD_CHANNEL 10 //6
+#define L2_STORE_CHANNEL  10 //6
+#define L3_LOAD_CHANNEL 11 //7
+#define L3_STORE_CHANNEL  11 //7
+#define MEM_LOAD_CHANNEL 12 //8
+#define MEM_STORE_CHANNEL  12 //8
+#define ADDRESS_GENERATION_UNIT 13 //9
+#define STORE_ADDRESS_GENERATION_UNIT -1
+#define LOAD_ADDRESS_GENERATION_UNIT -1
+#define PORT_0  14 //10
+#define PORT_1  15 //11
+#define PORT_2  16 //12
+#define PORT_3  17 //13
+#define PORT_4  18 //14
+#define RS_STALL  19 //15
+#define ROB_STALL 20 //16
+#define LB_STALL 21 //17
+#define SB_STALL 22 //18
+#define LFB_STALL 23 //19
+
+#else
 #define FP_ADDER  0
 #define FP_MULTIPLIER 1
 #define FP_DIVIDER  2
@@ -266,12 +343,80 @@
 #define SB_STALL 18
 #define LFB_STALL 19
 
-
+#endif
 
 
 
 // Nodes for SANDY BRIDGE. Set to -1 those that
 // do not exists
+
+#ifdef INT_FP_OPS
+#define SANDY_BRIDGE_COMP_NODES 8 //4
+#define N_COMP_NODES_START 0
+#define N_COMP_NODES_END 7 //3
+
+#define INT_ADD_NODE      0
+#define INT_MUL_NODE      1
+#define INT_DIV_NODE      2
+#define INT_SHUFFLE_NODE 3
+#define FP_ADD_NODE      4 //0
+#define FP_MUL_NODE      5 //1
+#define FP_DIV_NODE      6 //2
+#define VECTOR_SHUFFLE_NODE 7 //3
+
+
+#define SANDY_BRIDGE_MEM_NODES 8
+#define L1_LOAD_NODE     8 //4
+#define L1_STORE_NODE      9 //5
+#define L2_LOAD_NODE     10 //6
+#define L2_STORE_NODE      11 //7
+#define L3_LOAD_NODE     12 //8
+#define L3_STORE_NODE      13 //9
+#define MEM_LOAD_NODE    14 //10
+#define MEM_STORE_NODE     15 //11
+
+#define N_MEM_NODES_START 8 //4
+#define N_MEM_NODES_END 15 //11
+
+
+#define N_MISC_RESOURCES 7
+#define N_AGU_NODES     1
+#define N_PORT_NODES  5
+#define AGU_NODE           16 //12
+#define STORE_AGU_NODE     -1
+#define LOAD_AGU_NODE      -1
+#define PORT_0_NODE        17 //13
+#define PORT_1_NODE        18 //14
+#define PORT_2_NODE        19 //15
+#define PORT_3_NODE        20 //16
+#define PORT_4_NODE        21 //17
+#define N_MISC_RESOURCES_START 16 //12
+#define N_MISC_RESOURCES_END 21 //17
+
+
+#define N_BUFFER_NODES 5
+#define RS_STALL_NODE  22 //21
+#define ROB_STALL_NODE 23 //22
+#define LB_STALL_NODE 24 //23
+#define SB_STALL_NODE 25 //24
+#define LFB_STALL_NODE 26 //25
+#define N_BUFFER_NODES_START 22 //21
+#define N_BUFFER_NODES_END 26 //25
+
+#define N_PREFETCH_RESOURCES 6
+#define FIRST_PREFETCH_LEVEL L2_LOAD_NODE
+#define L2_LOAD_PREFETCH_NODE 27 //26
+#define L2_STORE_PREFETCH_NODE 28 //27
+#define L3_LOAD_PREFETCH_NODE 29 //28
+#define L3_STORE_PREFETCH_NODE 30 //29
+#define MEM_LOAD_PREFETCH_NODE 31 //30
+#define MEM_STORE_PREFETCH_NODE 32 //31
+#define N_PREFETCH_RESOURCES_START 33 //26
+#define N_PREFETCH_RESOURCES_END 34 //31
+
+
+#else
+
 #define SANDY_BRIDGE_COMP_NODES 4
 #define N_COMP_NODES_START 0
 #define N_COMP_NODES_END 3
@@ -289,8 +434,8 @@
 #define L2_STORE_NODE      7
 #define L3_LOAD_NODE     8
 #define L3_STORE_NODE      9
-#define MEM_LOAD_NODE   10
-#define MEM_STORE_NODE    11
+#define MEM_LOAD_NODE    10
+#define MEM_STORE_NODE     11
 
 #define N_MEM_NODES_START 4
 #define N_MEM_NODES_END 11
@@ -322,7 +467,7 @@
 
 #define N_PREFETCH_RESOURCES 6
 #define FIRST_PREFETCH_LEVEL L2_LOAD_NODE
-#define L2_LOAD_PREFETCH_NODE 26
+#define L2_LOAD_PREFETCH_NODE  26
 #define L2_STORE_PREFETCH_NODE 27
 #define L3_LOAD_PREFETCH_NODE 28
 #define L3_STORE_PREFETCH_NODE 29
@@ -332,6 +477,9 @@
 #define N_PREFETCH_RESOURCES_END 31
 
 
+
+
+#endif
 
 // ====================================================================//
 
@@ -507,9 +655,24 @@ public:
   
   uint8_t uarch;
   
+  unsigned SourceCodeLine;
   
   int rep;
-  
+ 
+#ifdef INT_FP_OPS
+// Begin new
+  // Number of bytes transferred from/to L1, L2, LLC, Mem, Total respectively
+  // Depends on program
+  vector<unsigned> Q;
+
+  // Throughput (bytes/second) for L1, L2, LLC, Mem respectively
+  vector<float> Beta;
+
+  // Computation throughput bound (ops/second)
+  float Pi;
+// End new
+#endif
+ 
   // Variables to track instructions count
   uint64_t TotalInstructions;
   uint64_t TotalSpan;
@@ -575,6 +738,12 @@ vector<ComplexTree<uint64_t> *> PointersToRemove;
   map<int,int> ReuseDistanceDistribution;
   map<int,map<uint64_t,uint> > ReuseDistanceDistributionExtended;
   
+#ifdef SOURCE_CODE_ANALYSIS
+  unordered_map<uint64_t,set<uint64_t> > SourceCodeLineOperations;
+  unordered_map<uint64_t,set<uint64_t> > SourceCodeLineInfo;
+  unordered_map<uint64_t,vector<uint64_t> > SourceCodeLineInfoBreakdown;
+#endif
+  
   //Constructor
   DynamicAnalysis(string TargetFunction,
                   string Microarchitecture,
@@ -612,7 +781,11 @@ vector<ComplexTree<uint64_t> *> PointersToRemove;
   
   
   void analyze();
-  void analyzeInstruction(Instruction &I, ExecutionContext &SF, GenericValue * visitResult);
+#ifdef INTERPRETER
+void analyzeInstruction(Instruction &I, ExecutionContext &SF,  GenericValue * visitResult);
+#else
+void analyzeInstruction (Instruction &I, uint64_t addr);
+#endif  
   
   void insertInstructionValueIssueCycle(Value* v,uint64_t InstructionIssueCycle, bool isPHINode = 0 );
   void insertCacheLineLastAccess(uint64_t v,uint64_t LastAccess );
@@ -630,16 +803,19 @@ vector<ComplexTree<uint64_t> *> PointersToRemove;
   
   uint64_t GetLastIssueCycle(unsigned ExecutionResource, bool WithPrefetch = false);
     
-
+  uint64_t GetTreeChunk(uint64_t i);
+  
   //Returns the DAG level occupancy after the insertion
   unsigned FindNextAvailableIssueCycle(unsigned OriginalCycle, unsigned ExecutionResource, uint64_t ExtendedInstructionType,  uint8_t NElementsVector = 1, bool TargetLevel = true);
   unsigned FindNextAvailableIssueCyclePortAndThroughtput(unsigned InstructionIssueCycle, unsigned ExtendedInstructionType, unsigned NElementsVector=1);
   
+  bool ThereIsAvailableBandwidth(unsigned NextAvailableCycle, unsigned ExecutionResource, bool& FoundInFullOccupancyCyclesTree, bool TargetLevel);
   
-  bool InsertNextAvailableIssueCycle(uint64_t NextAvailableCycle, unsigned ExecutionResource, uint64_t ExtendedInstructionType,
-                                     unsigned NElementsVector = 1, bool isPrefetch=0);
+  uint64_t FindNextAvailableIssueCycleUntilNotInFullOrEnoughBandwidth(unsigned NextCycle, unsigned ExecutionResource , bool& FoundInFullOccupancyCyclesTree, bool& EnoughBandwidth);
   
-  void IncreaseInstructionFetchCycle();
+  bool InsertNextAvailableIssueCycle(uint64_t NextAvailableCycle, unsigned ExecutionResource, uint64_t ExtendedInstructionType, unsigned NElementsVector = 1, bool isPrefetch=0);
+  
+  void IncreaseInstructionFetchCycle(bool EmptyBuffers = false);
   
   unsigned CalculateIssueCycleGranularity(unsigned ExecutionResource, unsigned NElementsVector=1);
   
@@ -656,13 +832,18 @@ vector<ComplexTree<uint64_t> *> PointersToRemove;
   unsigned CalculateResourceStallSpan(int resource, int stall);
   void CalculateResourceStallOverlapCycles(Tree<uint64_t> * n, int resource, uint64_t & OverlapCycles);
 
-  bool IsEmptyLevel(unsigned ExecutionResource, uint64_t Level, bool WithPrefetch = false);
+  
+  void CollectSourceCodeLineStatistics(uint64_t ResourceType, uint64_t Cycle,  uint64_t MaxLatencyLevel, uint64_t SpanIncrease, bool IsInFullOccupancyCyclesTree, bool IsInAvailableCyclesTree);
+  
+  bool IsEmptyLevel(unsigned ExecutionResource, uint64_t Level, bool& IsInAvailableCyclesTree,
+                    bool& IsInFullOccupancyCyclesTree , bool WithPrefetch = false);
   uint64_t FindNextNonEmptyLevel(unsigned ExecutionResource, uint64_t Level);
   bool isStallCycle(int ResourceType, uint64_t Level);
 
 
   unsigned GetMemoryInstructionType(int ReuseDistance, uint64_t MemoryAddress,bool isLoad=true);
     unsigned GetExtendedInstructionType(int OpCode, int ReuseDistance=0);
+  unsigned GetPositionSourceCodeLineInfoVector(uint64_t Resource);
       
   uint64_t GetMinIssueCycleReservationStation();
   uint64_t GetMinCompletionCycleLoadBuffer();
@@ -702,6 +883,11 @@ vector<ComplexTree<uint64_t> *> PointersToRemove;
   void PrintReorderBuffer();
   void PrintReservationStation();
   void PrintLoadBuffer();
+  void PrintLoadBufferTreeRecursive(SimpleTree<uint64_t> * p);
+  void PrintDispatchToLoadBufferTreeRecursive(ComplexTree<uint64_t> * p, bool key);
+  void PrintDispatchToLoadBufferTree();
+
+  void PrintLoadBufferTree();
   void PrintStoreBuffer();
   void PrintLineFillBuffer();
   void PrintDispatchToStoreBuffer();
@@ -715,7 +901,7 @@ vector<ComplexTree<uint64_t> *> PointersToRemove;
   unsigned int roundNextPowerOfTwo(unsigned int v);
   unsigned int roundNextMultiple(uint64_t num, int multiple);
   unsigned int roundNextMultipleOf2(uint64_t num);
-
+unsigned int DivisionRoundUp(float a, float b);
   void finishAnalysis();
   void printHeaderStat(string Header);
   
