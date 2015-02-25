@@ -20,7 +20,7 @@
 #include "llvm/Support/InstIterator.h"
 #include "llvm/Support/GetElementPtrTypeIterator.h"
 
-#define INTERPRETER
+//#define INTERPRETER
 
 #ifdef INTERPRETER
 #include "llvm/Support/top-down-size-splay.hpp"
@@ -28,7 +28,7 @@
 #include "top-down-size-splay.hpp"
 #endif
 
-//#define INT_FP_OPS
+#define INT_FP_OPS
 
 #include <iostream>
 #include <map>
@@ -46,13 +46,13 @@
 
 //#define DEBUG_SOURCE_CODE_LINE_ANALYSIS
 //#define DEBUG_MEMORY_TRACES
-#define DEBUG_REUSE_DISTANCE
-#define DEBUG_GENERIC
+//#define DEBUG_REUSE_DISTANCE
+//#define DEBUG_GENERIC
 //#define DEBUG_DEPS_FUNCTION_CALL
-#define DEBUG_SPAN_CALCULATION
+//#define DEBUG_SPAN_CALCULATION
 //#define DEBUG_AGU
 //#define DEBUG_OOO_BUFFERS
-#define DEBUG_ISSUE_CYCLE
+//#define DEBUG_ISSUE_CYCLE
 //#define DEBUG_PHI_NODE
 //#define DEBUG_FUNCTION_CALL_STACK
 //#define DEBUG_PREFETCHER
@@ -502,7 +502,10 @@ using namespace SplayTreeBoolean;
 using namespace SimpleSplayTree;
 using namespace ComplexSplayTree;
 
-
+  // For FullOccupancyCyles, the vector has a different meaning that for AvailableCycles.
+  // Each element of the vector contains the elements of the tree in a corresponding
+  // rage.
+  static const int SplitTreeRange = 131072;
 
 struct CacheLineInfo{
   uint64_t IssueCycle;
@@ -537,6 +540,30 @@ struct LessThanOrEqualValuePred
       }
     };
     
+class TBV {
+    class TBV_node {
+        public:
+        TBV_node():BitVector(20) {
+            
+        }
+        //vector<bool> BitVector;
+        dynamic_bitset<> BitVector; // from boost
+    };
+    
+    private:
+        vector<TBV_node> tbv_map;
+        bool e;
+    
+  public:
+    TBV();
+    bool get_node(uint64_t key, unsigned bitPosition);
+    bool get_node_nb(uint64_t key, unsigned bitPosition);
+    void insert_node(uint64_t key, unsigned bitPosition);
+    void delete_node(uint64_t key, unsigned bitPosition);
+    bool empty();
+};
+
+uint64_t BitScan(vector< TBV> &FullOccupancyCyclesTree, uint64_t key, unsigned bitPosition);
     
 class DynamicAnalysis {
   
@@ -705,13 +732,9 @@ public:
   vector< TreeBitVector<uint64_t> * > FullOccupancyCyclesTreeTreeBitVector;
   */
   
-  
   vector< Tree<uint64_t> * > AvailableCyclesTree;
-  // For FullOccupancyCyles, the vector has a different meaning that for AvailableCycles.
-  // Each element of the vector contains the elements of the tree in a corresponding
-  // rage.
-  int SplitTreeRange;
-  vector< TreeBitVector<uint64_t> * > FullOccupancyCyclesTree;
+
+  vector< TBV> FullOccupancyCyclesTree;
   
   
   vector <Tree<uint64_t> * > StallCycles;
