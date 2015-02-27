@@ -56,3 +56,4 @@ uint64_t BitScan(vector< TBV> &FullOccupancyCyclesTree, uint64_t key, unsigned b
     
     return key;
 }
+

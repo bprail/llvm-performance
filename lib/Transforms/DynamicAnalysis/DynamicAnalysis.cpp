@@ -5586,10 +5586,14 @@ DynamicAnalysis::finishAnalysis(){
       report_fatal_error("LastIssueCycle > InstructionFetchCycle for resource\n");
     }
   }
+  
+  
+  ComputeAvailableTreeFinal();
+  
   for (unsigned j=0; j< nExecutionUnits; j++) {
     TmpResourcesVector.clear();
     TmpResourcesVector.push_back(j);
-    IssueSpan[j] = CalculateIssueSpan(TmpResourcesVector);
+    IssueSpan[j] = CalculateIssueSpanFinal(TmpResourcesVector);
   }
   
   
@@ -5622,9 +5626,9 @@ DynamicAnalysis::finishAnalysis(){
       TmpResourcesVector.push_back(FP_DIVIDER);
       
 #ifdef INT_FP_OPS
-      IssueSpan[INT_ADDER] = CalculateIssueSpan(TmpResourcesVector);
+      IssueSpan[INT_ADDER] = CalculateIssueSpanFinal(TmpResourcesVector);
 #else
-      IssueSpan[FP_ADDER] = CalculateIssueSpan(TmpResourcesVector);
+      IssueSpan[FP_ADDER] = CalculateIssueSpanFinal(TmpResourcesVector);
 #endif
     }
     
@@ -5652,14 +5656,14 @@ DynamicAnalysis::finishAnalysis(){
               TmpResourcesVector.push_back(j+5);
 #endif
               
-              Span =CalculateGroupSpan(TmpResourcesVector);
+              Span =CalculateGroupSpanFinal(TmpResourcesVector);
               ResourcesSpan[j] = Span;
             }else{
               if (!MergeArithmeticOps) { // Calculate only once
                 TmpResourcesVector.clear();
                 TmpResourcesVector.push_back(j);
                 DEBUG(dbgs() << "Calculating group span for resource " << j << "\n");
-                Span =CalculateGroupSpan(TmpResourcesVector);
+                Span =CalculateGroupSpanFinal(TmpResourcesVector);
                 DEBUG(dbgs() << "Span " << Span << "\n");
                 ResourcesSpan[j] = Span;
               }
@@ -5674,7 +5678,7 @@ DynamicAnalysis::finishAnalysis(){
       
       TmpResourcesVector.clear();
       TmpResourcesVector.push_back(j);
-      IssueSpan[j] = CalculateIssueSpan(TmpResourcesVector);
+      IssueSpan[j] = CalculateIssueSpanFinal(TmpResourcesVector);
       
       //Calculate span is an expensive operation. Therefore, wehenever we can, we
       // obtain the span from a different way.
@@ -5686,8 +5690,8 @@ DynamicAnalysis::finishAnalysis(){
       if (!MergeArithmeticOps) {
         TmpResourcesVector.clear();
         TmpResourcesVector.push_back(j);
-        uint64_t CalculateSpanResult = CalculateSpan(j);
-        uint64_t CalculateGroupSpanResult = CalculateGroupSpan(TmpResourcesVector);
+        uint64_t CalculateSpanResult = CalculateSpanFinal(j);
+        uint64_t CalculateGroupSpanResult = CalculateGroupSpanFinal(TmpResourcesVector);
         DEBUG(dbgs() << "CalculateGroupSpanResult  " <<  CalculateGroupSpanResult << "\n");
         
         if (!( CalculateSpanResult== Span  &&  Span == CalculateGroupSpanResult))
@@ -5782,7 +5786,7 @@ DynamicAnalysis::finishAnalysis(){
 #endif
                 
               {
-                TotalSpan = CalculateGroupSpan(TmpResourcesVector);
+                TotalSpan = CalculateGroupSpanFinal(TmpResourcesVector);
               }
           }else{
             if (j>FP_DIVIDER) {
@@ -5852,7 +5856,7 @@ DynamicAnalysis::finishAnalysis(){
           }
           TmpResourcesVector.push_back(i);
           
-          ResourcesTotalStallSpanVector[i]= CalculateGroupSpan(TmpResourcesVector);
+          ResourcesTotalStallSpanVector[i]= CalculateGroupSpanFinal(TmpResourcesVector);
           
         }
       
@@ -5903,7 +5907,7 @@ DynamicAnalysis::finishAnalysis(){
       TotalStallSpan = 0;
     }else{
       if (TmpResourcesVector.size()!=1) {
-        TotalStallSpan = CalculateGroupSpan(TmpResourcesVector);
+        TotalStallSpan = CalculateGroupSpanFinal(TmpResourcesVector);
       }
     }
     
@@ -5920,7 +5924,7 @@ DynamicAnalysis::finishAnalysis(){
     for(int j=PORT_0; j<= PORT_4; j++){
       TmpResourcesVector.clear();
       TmpResourcesVector.push_back(j);
-      dbgs() << ResourcesNames[j]<< "\t\t" << CalculateGroupSpan(TmpResourcesVector) << "\n";
+      dbgs() << ResourcesNames[j]<< "\t\t" << CalculateGroupSpanFinal(TmpResourcesVector) << "\n";
     }
     
     if (!ReportOnlyPerformance) {
@@ -5963,7 +5967,7 @@ DynamicAnalysis::finishAnalysis(){
                 
                 TmpResourcesVector.push_back(j);
                 
-                PairSpan = CalculateGroupSpan(TmpResourcesVector);
+                PairSpan = CalculateGroupSpanFinal(TmpResourcesVector);
                 
               }else{
                 if (InstructionsCountExtended[i]==0) {
@@ -6069,7 +6073,7 @@ DynamicAnalysis::finishAnalysis(){
                 }
 #endif
                 TmpResourcesVector.push_back(j);
-                PairSpan = CalculateIssueSpan(TmpResourcesVector);
+                PairSpan = CalculateIssueSpanFinal(TmpResourcesVector);
                 //PairSpan = CalculateGroupSpanUnitLatency(TmpResourcesVector);
                 ResourcesIssueStallSpanVector[i][j-RS_STALL] = PairSpan;
                 
@@ -6189,7 +6193,7 @@ DynamicAnalysis::finishAnalysis(){
                     }
 #endif
                     TmpResourcesVector.push_back(j);
-                    PairSpan = CalculateGroupSpan(TmpResourcesVector);
+                    PairSpan = CalculateGroupSpanFinal(TmpResourcesVector);
                     
                   }else{
                     if(InstructionsCountExtended[i]==0){
@@ -6331,7 +6335,7 @@ DynamicAnalysis::finishAnalysis(){
 #endif
                     
                     TmpResourcesVector.push_back(j);
-                    PairSpan = CalculateGroupSpan(TmpResourcesVector);
+                    PairSpan = CalculateGroupSpanFinal(TmpResourcesVector);
                     
                   }else{
                     if(InstructionsCountExtended[i]==0){
@@ -6424,7 +6428,7 @@ DynamicAnalysis::finishAnalysis(){
             TmpResourcesVector.clear();
             TmpResourcesVector.push_back(j);
             TmpResourcesVector.push_back(i);
-            PairSpan = CalculateGroupSpan(TmpResourcesVector);
+            PairSpan = CalculateGroupSpanFinal(TmpResourcesVector);
             
           }else{
             if(InstructionsCountExtended[i]==0){
@@ -6683,5 +6687,7 @@ DynamicAnalysis::finishAnalysis(){
     
     
   }
+ 
   
-}
+  
+}  

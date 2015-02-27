@@ -32,6 +32,7 @@
 
 #include <iostream>
 #include <map>
+#include <list>
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -540,6 +541,8 @@ struct LessThanOrEqualValuePred
       }
     };
     
+
+  
 class TBV {
     class TBV_node {
         public:
@@ -561,6 +564,30 @@ class TBV {
     void insert_node(uint64_t key, unsigned bitPosition);
     void delete_node(uint64_t key, unsigned bitPosition);
     bool empty();
+};
+
+struct ACTNode {
+  public:
+    uint64_t key;
+    int32_t issueOccupancy;
+    int32_t widthOccupancy;
+    int32_t occupancyPrefetch;
+    uint64_t address;
+};
+  
+class ACT {
+	private:
+		//list<ACTNode*> act_map;
+		//list<ACTNode*>::iterator currNode;
+        vector< TBV> act_vec;
+    
+	public:
+        //bool empty;
+	//ACT(uint);// Ideally, we would resize knowing the size of the original spanning tree
+	bool get_node(uint64_t, unsigned);
+	void push_back(ACTNode*, unsigned);
+    void DebugACT();
+    size_t size();
 };
 
 uint64_t BitScan(vector< TBV> &FullOccupancyCyclesTree, uint64_t key, unsigned bitPosition);
@@ -733,7 +760,8 @@ public:
   */
   
   vector< Tree<uint64_t> * > AvailableCyclesTree;
-
+  ACT ACTFinal;
+  
   vector< TBV> FullOccupancyCyclesTree;
   
   
@@ -849,6 +877,14 @@ void analyzeInstruction (Instruction &I, uint64_t addr);
   
   unsigned CalculateIssueSpan(vector<int> & ResourcesVector);
   
+  // NEW FINAL VERSIONS
+  uint64_t CalculateSpanFinal(int ResourceType);
+  //unsigned CalculateGroupSpan(int NResources, ...);
+  unsigned CalculateGroupSpanFinal(vector<int> & ResourcesVector, bool WithPrefetch = false, bool ForceUnitLatency = false);
+  
+  unsigned CalculateIssueSpanFinal(vector<int> & ResourcesVector);
+  bool IsEmptyLevelFinal(unsigned ExecutionResource, uint64_t Level, bool& IsInAvailableCyclesTree,
+                    bool& IsInFullOccupancyCyclesTree , bool WithPrefetch = false);
   
   unsigned CalculateGroupSpanUnitLatency(vector<int> & ResourcesVector, bool ForceUnitLatency = false);
 
@@ -929,5 +965,9 @@ unsigned int DivisionRoundUp(float a, float b);
   void printHeaderStat(string Header);
   
   int getInstructionType(Instruction &I);
+  
+  void ComputeAvailableTreeFinalHelper(uint p, Tree<uint64_t>* t, uint d);
+  void ComputeAvailableTreeFinal(bool WithPrefetch = false);
+  void DebugACT(uint p);
 };
 #endif
